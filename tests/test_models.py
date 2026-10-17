@@ -105,6 +105,15 @@ def test_model_protocol_profile_is_model_family_policy() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    "model", ["google/gemini-4-argon", "google/gemini-4.0-flash", "google/gemini-10-pro"]
+)
+def test_later_gemini_generations_keep_signature_protections(model: str) -> None:
+    profile = model_protocol_profile(model)
+    assert profile.serial_tool_calls
+    assert profile.is_signature_rejection("Request contains an invalid argument.")
+
+
 def test_provider_policy_centralizes_routing_and_data_controls() -> None:
     assert provider_policy() is None
     assert provider_policy(order=["Baseten"], data_collection="deny", zdr=True) == {

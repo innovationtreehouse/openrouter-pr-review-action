@@ -46,6 +46,19 @@ class ModelProtocolProfile:
         return "invalid_argument" in lowered_error or "invalid argument" in lowered_error
 
 
+_GEMINI_MAJOR_RE = re.compile(r"^google/gemini-(\d+)")
+
+
+def _gemini_signs_tool_calls(model: str) -> bool:
+    """Gemini 3 and later reject tool history with a missing thought signature.
+
+    Observed on 3.x and on google/gemini-4-argon (generic INVALID_ARGUMENT after
+    several accepted tool turns), so the gate is the generation, not one prefix.
+    """
+    match = _GEMINI_MAJOR_RE.match(model)
+    return match is not None and int(match.group(1)) >= 3
+
+
 def model_protocol_profile(model: str) -> ModelProtocolProfile:
     """Resolve stable request/transcript behavior without a live API lookup."""
 
@@ -54,7 +67,7 @@ def model_protocol_profile(model: str) -> ModelProtocolProfile:
     return ModelProtocolProfile(
         max_response_tokens=GEMINI_MAX_RESPONSE_TOKENS,
         preserve_provider_metadata=True,
-        serial_tool_calls=model.startswith("google/gemini-3"),
+        serial_tool_calls=_gemini_signs_tool_calls(model),
     )
 
 

@@ -1367,8 +1367,8 @@ def test_gemini_3_disables_parallel_tool_calls_only_while_tools_are_active(
     assert result.sanitized_tool_turns is None
 
 
-def test_newer_gemini_models_do_not_inherit_gemini_3_tool_protocol(tmp_path: Path) -> None:
-    """Only the observed Gemini 3 signature workaround is provider-specific."""
+def test_pre_gemini_3_models_keep_the_generic_tool_protocol(tmp_path: Path) -> None:
+    """The signature workaround starts at Gemini 3; older generations keep the default."""
     (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
     payloads: list[dict] = []
 
@@ -1381,7 +1381,7 @@ def test_newer_gemini_models_do_not_inherit_gemini_3_tool_protocol(tmp_path: Pat
         return _findings_reply()
 
     result = run_lane(
-        model="google/gemini-4.0-flash",
+        model="google/gemini-2.5-flash",
         messages=[{"role": "user", "content": "review"}],
         api_key="sk-test",
         workspace=tmp_path,
