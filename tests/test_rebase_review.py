@@ -261,7 +261,7 @@ def test_rebase_rereview_with_brief_compacts_history_and_body_once(monkeypatch, 
     from or_pr_review.brief import BRIEF_HEADING, BRIEF_MARKER_RE
     from or_pr_review.schema import LaneResult
 
-    body = "## Summary\nAdds the guard back after rebase.\n\n" + "Detail line. " * 400
+    body = "## Summary\nAdds the guard back after rebase.\n\n" + "Detail line. " * 1300
     brief = {
         "intent": "Restore the guard.",
         "claims": [{"text": "guard", "quote": "Adds the guard back after rebase."}],

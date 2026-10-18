@@ -476,16 +476,19 @@ the prompt says how many were omitted.
   findings, then PR comments, the newest earlier review, older digests, and
   last replies on settled findings.
 - **Model brief (optional).** With `compaction: auto` and a `compaction_model`,
-  a re-review makes one extra request when the PR body exceeds 2,000 bytes or
+  a re-review makes one extra request when the PR body exceeds 16,000 bytes or
   the history overflows its budget. It returns a structured brief (intent,
   claims, non-goals, test claims, open questions, finding arguments). Every
   item must carry a quote that appears verbatim in the source; items whose
   quote does not are dropped. A compacted body is replaced by its first 600
-  bytes plus the brief; evicted history is replaced by the brief's rendering.
+  bytes, its closing-keyword lines (`Fixes #N` and the like) and the brief;
+  evicted history is replaced by the brief's rendering. The request runs at
+  medium reasoning effort.
   Initial reviews never use it, and neither do legacy matrix lanes.
 - **Cache.** The brief is stored in a hidden bot-authored marker on the posted
   review, keyed by the sha256 of its source text, and reused while the source is
-  unchanged. A marker over 12,000 bytes, or a ledger too large to leave room for
+  unchanged. A failed brief is cached the same way, so later rounds on the
+  same source skip the request. A marker over 12,000 bytes, or a ledger too large to leave room for
   it, is not written.
 - **Routing.** The request uses the `compaction_model` entry in `model_routes`
   (provider pin, service tier) when there is one, and a timeout of
@@ -497,7 +500,7 @@ Operators see these stderr lines:
 
 ```text
 history compaction: before=<bytes> after=<bytes> dropped=<section:count,...|0>
-review brief: <skipped|reused|built|failed> (source_bytes=<n>, brief_bytes=<n>)
+review brief: <skipped|reused|built|failed|failed-cached> (source_bytes=<n>, brief_bytes=<n>)
 ```
 
 `dropped` counts evicted items per section, plus `comments_filtered`. A failed
