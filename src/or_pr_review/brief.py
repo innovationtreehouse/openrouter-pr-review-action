@@ -7,7 +7,6 @@ Every failure returns None so callers fall back to the uncompacted prompt.
 from __future__ import annotations
 
 import base64
-import binascii
 import hashlib
 import json
 import re
@@ -16,6 +15,7 @@ from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
+from or_pr_review.compaction import scrub_surrogates
 from or_pr_review.harness import response_message_text
 from or_pr_review.models import base_chat_payload
 from or_pr_review.prompt import _fence
@@ -132,6 +132,10 @@ def _text(value: object, limit: int) -> str:
     return value.strip()[:limit] if isinstance(value, str) else ""
 
 
+def _list(value: object) -> list[Any]:
+    return value if isinstance(value, list) else []
+
+
 def _coerce(raw: object, sources: list[str] | None) -> ReviewBrief | None:
     """Bound sizes and, when sources are given, drop items whose quote is not verbatim."""
     if not isinstance(raw, dict):
@@ -148,12 +152,12 @@ def _coerce(raw: object, sources: list[str] | None) -> ReviewBrief | None:
     lists: dict[str, Any] = {}
     for name in _LISTS:
         items: list[BriefItem] = []
-        for item in raw.get(name) or []:
+        for item in _list(raw.get(name)):
             if isinstance(item, dict) and (quote := quoted(item)) and _text(item.get("text"), 1):
                 items.append(BriefItem(_text(item["text"], MAX_TEXT), quote))
         lists[name] = tuple(items[:MAX_ITEMS])
     arguments: list[FindingArgument] = []
-    for item in raw.get("finding_arguments") or []:
+    for item in _list(raw.get("finding_arguments")):
         if isinstance(item, dict) and (quote := quoted(item)) and _text(item.get("argument"), 1):
             arguments.append(
                 FindingArgument(
@@ -217,15 +221,17 @@ def brief_marker(brief: ReviewBrief, *, repo: str, pr: int, source_sha256: str) 
 def extract_brief(
     bodies_by_bot: list[str], repo: str, pr: int, source_sha256: str
 ) -> ReviewBrief | None:
-    """Newest brief bound to this repo/PR/source. Callers pass only bot-authored bodies."""
+    """Newest brief bound to this repo/PR/source. Callers pass only bot-authored bodies.
+
+    Only a body's FIRST marker counts: the publisher writes it in the header, so a
+    marker echoed later in finding text can never shadow it. Never raises.
+    """
     for body in reversed(bodies_by_bot):
-        for match in reversed(list(BRIEF_MARKER_RE.finditer(body))):
-            if len(match.group(0)) > MAX_MARKER_BYTES:
-                continue
-            try:
-                payload = json.loads(base64.b64decode(match.group(1), validate=True))
-            except (binascii.Error, ValueError):
-                continue
+        match = BRIEF_MARKER_RE.search(body)
+        if match is None or len(match.group(0)) > MAX_MARKER_BYTES:
+            continue
+        try:
+            payload = json.loads(base64.b64decode(match.group(1), validate=True))
             if (
                 isinstance(payload, dict)
                 and payload.get("repo") == repo
@@ -234,6 +240,8 @@ def extract_brief(
                 and (brief := _coerce(payload.get("brief"), None)) is not None
             ):
                 return brief
+        except Exception:  # noqa: BLE001, S112 - a bad cache is just a cache miss
+            continue
     return None
 
 
@@ -274,30 +282,44 @@ class BriefSession:
     sections: dict[str, str] = field(default_factory=dict)
     rendered_in_history: bool = False
 
+    def __post_init__(self) -> None:
+        self.body = scrub_surrogates(self.body)
+
     def _get(self, sections: dict[str, str]) -> ReviewBrief | None:
         if not self.model or sections == self.sections:
             return self.brief
-        digest = source_digest(sections)
-        brief = extract_brief(self.cached_bodies, self.repo, self.pr, digest)
-        if brief is not None:
-            self.status = "reused"
-        else:
-            brief = build_brief(sections, model=self.model, chat=self.chat, route=self.route)
-            self.status = "built" if brief is not None else "failed"
+        try:
+            digest = source_digest(sections)
+            brief = extract_brief(self.cached_bodies, self.repo, self.pr, digest)
+            if brief is not None:
+                self.status = "reused"
+            else:
+                brief = build_brief(sections, model=self.model, chat=self.chat, route=self.route)
+                self.status = "built" if brief is not None else "failed"
+        except Exception:  # noqa: BLE001 - any brief failure means "no brief"
+            brief, self.status = None, "failed"
         self.sections, self.brief = sections, brief
         return brief
 
     def summarize_evicted(self, texts: list[str]) -> str | None:
         """Hook for compaction's summary_for_evicted."""
-        history = "\n\n".join(text for text in texts if text)
+        history = scrub_surrogates("\n\n".join(text for text in texts if text))
         brief = self._get({"pr_body": self.body, "history": history})
-        if brief is None:
-            return None
-        self.rendered_in_history = True
-        return render_brief(brief)
+        try:
+            rendered = render_brief(brief) if brief is not None else None
+        except Exception:  # noqa: BLE001 - degrade to no summary
+            rendered = None
+        self.rendered_in_history = rendered is not None
+        return rendered
 
     def compact_body(self) -> tuple[str, str]:
         """(body for the prompt, brief block); the full body when no brief applies."""
+        try:
+            return self._compact_body()
+        except Exception:  # noqa: BLE001 - degrade to the full body
+            return self.body, ""
+
+    def _compact_body(self) -> tuple[str, str]:
         encoded = self.body.encode("utf-8")
         if len(encoded) <= COMPACT_BODY_THRESHOLD:
             return self.body, ""
@@ -316,9 +338,11 @@ class BriefSession:
     def marker(self) -> str:
         if self.brief is None:
             return ""
-        return brief_marker(
-            self.brief, repo=self.repo, pr=self.pr, source_sha256=source_digest(self.sections)
-        )
+        try:
+            digest = source_digest(self.sections)
+            return brief_marker(self.brief, repo=self.repo, pr=self.pr, source_sha256=digest)
+        except Exception:  # noqa: BLE001 - no cache marker rather than a failed review
+            return ""
 
     def log(self, brief_block: str) -> None:
         source_bytes = sum(len(text.encode("utf-8")) for text in self.sections.values())

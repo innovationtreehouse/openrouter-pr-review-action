@@ -351,12 +351,6 @@ def test_huge_lists_and_texts_in_a_cached_brief_are_bounded():
     "field", ["claims", "non_goals", "test_claims", "open_questions", "finding_arguments"]
 )
 @pytest.mark.parametrize("value", [5, True, 1.5])
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG: a cached brief whose list field is a number makes _coerce iterate an int and "
-    "raise TypeError out of extract_brief (only ValueError/binascii.Error are caught), "
-    "which aborts BriefSession._get and so the whole review collection",
-)
 def test_cached_brief_with_a_numeric_list_field_does_not_raise(field, value):
     payload = {
         "repo": REPO,
@@ -469,12 +463,6 @@ def test_rendered_brief_cannot_escape_its_fence_through_quotes_or_text():
     assert headings_outside_fences(rendered) == [BRIEF_HEADING]
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG: extract_brief trusts the LAST marker in a bot body, but finding text (model "
-    "output echoing PR content) is rendered after the header marker without stripping "
-    "'<!--' markers, so an echoed forged marker shadows the real cached brief",
-)
 def test_forged_marker_echoed_into_a_finding_does_not_shadow_the_real_brief():
     body_text = "x" * 3000
     digest = source_digest({"pr_body": body_text})
@@ -494,12 +482,6 @@ def test_forged_marker_echoed_into_a_finding_does_not_shadow_the_real_brief():
     assert got is not None and got.intent == "REAL intent."
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG: same shadowing for the ledger: a marker echoed into finding text is read "
-    "instead of the header ledger (pre-existing in loop.extract_ledger, newly reachable "
-    "because compaction now feeds raw PR text back to the model)",
-)
 def test_forged_ledger_echoed_into_a_finding_does_not_shadow_the_real_ledger():
     real = Ledger(2, (LedgerFinding("r2-1", "bug", "a.py", 1, "REAL", "ev", "open"),), SHA)
     parts = render_review_parts(
@@ -678,12 +660,6 @@ def test_brief_source_tail_clip_keeps_valid_utf8_and_quote_check_still_works():
     json.dumps(captured[0]).encode("utf-8")
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG(low): a lone surrogate (valid in a json.loads'd string, e.g. GitHub body "
-    "'\\ud800') makes compact_history raise UnicodeEncodeError in _size, contradicting "
-    "'overflow never fails the review'",
-)
 def test_lone_surrogate_in_a_reply_does_not_raise():
     compact_history(budget=1000, bot_login=BOT, replies=[("g/r1-1", "u", "a\ud800b")], comments=[])
 
@@ -758,16 +734,9 @@ def test_10k_replies_to_one_finding_group_into_one():
     assert took < 1 and "msg 9999" in res.text and "(+9999 earlier replies)" in res.text
 
 
-_BELOW_FIXED_TEXT = pytest.mark.xfail(
-    strict=True,
-    reason="BUG(low): the rebase preamble (~150B) and '[N older items omitted]' line are "
-    "emitted unconditionally, so budgets below ~160B are exceeded; real budgets are 16-64KB",
-)
-
-
 @pytest.mark.parametrize(
     "budget",
-    [pytest.param(b, marks=_BELOW_FIXED_TEXT) for b in (0, 1, 2, 10, 50, 63, 64, 65, 100)] + [200],
+    [0, 1, 2, 10, 50, 63, 64, 65, 100, 200],
 )
 def test_tiny_budgets_never_raise_and_never_exceed(budget):
     big = [(f"g/r1-{i}", "u", "x" * 3000) for i in range(30)]
@@ -804,11 +773,6 @@ def test_summary_hook_with_tiny_budgets_and_hostile_hooks():
                 assert len(res.text.encode()) <= budget
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG(medium): _MARKER_RE '<!--[\\s\\S]*?-->' is quadratic on unterminated '<!--' "
-    "runs; one 65KB PR comment takes ~2.5s, and 30 such comments stall collection ~75s",
-)
 def test_unterminated_comment_openers_do_not_stall_the_cleaner():
     evil = "<!--" * 16_250  # 65,000 chars: GitHub's comment size limit
     _, took = _timed(

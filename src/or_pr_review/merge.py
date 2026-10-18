@@ -39,8 +39,8 @@ _DUPLICATE_NOISE_TOKENS = {
 
 
 def neutralize_mentions(value: str) -> str:
-    """Stop model-authored text from pinging GitHub users or teams."""
-    return value.replace("@", "@\u200b")
+    """Stop model-authored text from pinging users/teams or forming hidden `<!--` markers."""
+    return value.replace("@", "@\u200b").replace("<!--", "<!\u200b--")
 
 
 @dataclass

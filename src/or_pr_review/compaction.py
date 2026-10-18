@@ -24,7 +24,6 @@ CODE_BLOCK_MAX_LINES = 20
 CODE_BLOCK_KEEP_LINES = 5
 _OMISSION_RESERVE = 64
 
-_MARKER_RE = re.compile(r"<!--[\s\S]*?-->")
 _COMMIT_RE = re.compile(r"\*\*Commit:\*\* `([0-9a-fA-F]{7,64})`")
 _VERDICT_RE = re.compile(r"\*\*Verdict:\*\* `([^`\n]+)`")
 _ROUND_RE = re.compile(r"^### Round (\d+) resolution", re.MULTILINE)
@@ -86,6 +85,11 @@ def compact_history(
     shrink to one line. Findings of the newest review that `ledger_findings`
     already carries collapse to a one-line reference.
     """
+    if review_bodies is not None:
+        review_bodies = [scrub_surrogates(body) for body in review_bodies]
+    scrub = scrub_surrogates
+    replies = [(scrub(fid), scrub(login), scrub(body)) for fid, login, body in replies]
+    comments = [(scrub(login), scrub(body)) for login, body in comments]
     before = sum(_size(body) for body in review_bodies or [])
     before += sum(_size(body) for _, _, body in replies) + sum(_size(b) for _, b in comments)
     dropped: dict[str, int] = {}
@@ -154,6 +158,9 @@ def compact_history(
     if evicted:
         verb = "summarized" if summary else "omitted"
         blocks.append(f"[{len(evicted)} older items {verb}]")
+    # Tiny budgets: shed the preamble, then the omission line, then everything.
+    while blocks and _size("\n\n".join(blocks)) > budget:
+        blocks.remove(preamble if preamble in blocks else blocks[-1])
     text = "\n\n".join(blocks)
     return CompactedHistory(text, before, _size(text), dropped, summarized=bool(summary))
 
@@ -195,7 +202,7 @@ def _dedupe_reviews(bodies: list[str], dropped: dict[str, int]) -> list[str]:
     """Strip markers, drop status-only bodies, keep only the newest review per commit."""
     cleaned: list[tuple[str | None, str]] = []
     for body in bodies:
-        text = _MARKER_RE.sub("", body).strip()
+        text = _strip_markers(body).strip()
         if not text or _is_status(body) or _is_status(text):
             dropped["reviews_status"] = dropped.get("reviews_status", 0) + 1
             continue
@@ -308,7 +315,7 @@ def _clean_comment(body: str) -> str:
     """Drop quoted lines and collapse long fenced code blocks."""
     out: list[str] = []
     block: list[str] | None = None
-    for line in _MARKER_RE.sub("", body).splitlines():
+    for line in _strip_markers(body).splitlines():
         if block is not None:
             block.append(line)
             if line.lstrip().startswith("```"):
@@ -348,6 +355,24 @@ def _clip_head(text: str, max_bytes: int) -> str:
     if max_bytes < _size(marker):
         return encoded[: max(0, max_bytes)].decode("utf-8", errors="ignore")
     return encoded[: max_bytes - _size(marker)].decode("utf-8", errors="ignore") + marker
+
+
+def scrub_surrogates(text: str) -> str:
+    """Replace lone surrogates (valid in JSON strings, unencodable in UTF-8) with U+FFFD."""
+    return text.encode("utf-8", "surrogatepass").decode("utf-8", "replace")
+
+
+def _strip_markers(text: str) -> str:
+    """Linear `<!-- ... -->` removal; an unterminated opener drops the rest of the text."""
+    out, pos = [], 0
+    while (start := text.find("<!--", pos)) != -1:
+        out.append(text[pos:start])
+        end = text.find("-->", start + 4)
+        if end == -1:
+            return "".join(out)
+        pos = end + 3
+    out.append(text[pos:])
+    return "".join(out)
 
 
 def _size(text: str) -> int:

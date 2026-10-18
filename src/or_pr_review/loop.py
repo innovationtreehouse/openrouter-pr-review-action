@@ -410,12 +410,12 @@ def has_ledger_marker(body: str) -> bool:
 
 
 def extract_ledger(body: str, *, repo: str, pr_number: int) -> Ledger | None:
-    """Decode the newest valid ledger marker bound to this repo/PR, else None."""
-    for match in reversed(list(_LEDGER_RE.finditer(body))):
-        ledger = _decode(match.group(1), repo=repo, pr_number=pr_number)
-        if ledger is not None:
-            return ledger
-    return None
+    """Decode the body's FIRST ledger marker (the publisher's header position).
+
+    A marker echoed later, e.g. in finding text, must never shadow the header one.
+    """
+    match = _LEDGER_RE.search(body)
+    return _decode(match.group(1), repo=repo, pr_number=pr_number) if match else None
 
 
 def latest_ledger(bodies: list[str], *, repo: str, pr_number: int) -> Ledger | None:
