@@ -34,12 +34,16 @@ MAX_INPUT_BYTES = 96_000
 MAX_ITEMS = 12
 MAX_TEXT = 300
 MAX_QUOTE = 160
-COMPACT_BODY_THRESHOLD = 2_000
+# Ordinary bodies (2-4 KB) are never cut; a compacted one keeps its head and closing lines.
+COMPACT_BODY_THRESHOLD = 16_000
 BODY_HEAD_BYTES = 600
 BRIEF_HEADING = (
     "## Review brief (model-generated from the untrusted PR body and history; quotes are verbatim)"
 )
 _LISTS = ("claims", "non_goals", "test_claims", "open_questions")
+CLOSING_LINE_RE = re.compile(
+    r"(?im)^.*\b(?:fix(?:e[sd])?|close[sd]?|resolve[sd]?)\b:?\s+[\w./-]*#\d+.*$"
+)
 
 
 @dataclass(frozen=True)
@@ -175,6 +179,10 @@ def _coerce(raw: object, sources: list[str] | None) -> ReviewBrief | None:
     return None if brief.is_empty() else brief
 
 
+# Cached "this source already failed" marker; never rendered or reused as content.
+FAILED_BRIEF = ReviewBrief(intent="")
+
+
 def build_brief(
     source_sections: dict[str, str],
     *,
@@ -189,8 +197,13 @@ def build_brief(
     per_section = MAX_INPUT_BYTES // len(sections)
     sections = {name: _tail(text, per_section) for name, text in sections.items()}
     try:
+        # Medium effort, as the router's free rung pins it: default effort lets free
+        # endpoints idle out mid-reasoning, and a brief needs little reasoning.
         payload, profile = base_chat_payload(
-            model=model, response_schema=brief_json_schema(), **(route or {})
+            model=model,
+            response_schema=brief_json_schema(),
+            reasoning={"effort": "medium"},
+            **(route or {}),
         )
         system = SYSTEM_PROMPT
         if not profile.json_schema_output:
@@ -208,9 +221,13 @@ def build_brief(
         return None
 
 
-def brief_marker(brief: ReviewBrief, *, repo: str, pr: int, source_sha256: str) -> str:
-    """Hidden cache marker for the review body; "" when it would exceed the cap."""
-    payload = {"repo": repo, "pr": pr, "source_sha256": source_sha256, "brief": asdict(brief)}
+def brief_marker(brief: ReviewBrief | None, *, repo: str, pr: int, source_sha256: str) -> str:
+    """Hidden cache marker for the review body; "" when it would exceed the cap.
+
+    brief=None records a failed brief so later rounds on the same source skip the call.
+    """
+    payload: dict[str, Any] = {"repo": repo, "pr": pr, "source_sha256": source_sha256}
+    payload.update({"brief": asdict(brief)} if brief is not None else {"failed": True})
     token = base64.b64encode(json.dumps(payload, separators=(",", ":")).encode("utf-8")).decode(
         "ascii"
     )
@@ -225,6 +242,7 @@ def extract_brief(
 
     Only a body's FIRST marker counts: the publisher writes it in the header, so a
     marker echoed later in finding text can never shadow it. Never raises.
+    Returns FAILED_BRIEF when the newest bound marker records a failed brief.
     """
     for body in reversed(bodies_by_bot):
         match = BRIEF_MARKER_RE.search(body)
@@ -237,9 +255,11 @@ def extract_brief(
                 and payload.get("repo") == repo
                 and payload.get("pr") == pr
                 and payload.get("source_sha256") == source_sha256
-                and (brief := _coerce(payload.get("brief"), None)) is not None
             ):
-                return brief
+                if payload.get("failed") is True:
+                    return FAILED_BRIEF
+                if (brief := _coerce(payload.get("brief"), None)) is not None:
+                    return brief
         except Exception:  # noqa: BLE001, S112 - a bad cache is just a cache miss
             continue
     return None
@@ -291,7 +311,9 @@ class BriefSession:
         try:
             digest = source_digest(sections)
             brief = extract_brief(self.cached_bodies, self.repo, self.pr, digest)
-            if brief is not None:
+            if brief is FAILED_BRIEF:
+                brief, self.status = None, "failed-cached"
+            elif brief is not None:
                 self.status = "reused"
             else:
                 brief = build_brief(sections, model=self.model, chat=self.chat, route=self.route)
@@ -327,6 +349,11 @@ class BriefSession:
         if brief is None:
             return self.body, ""
         head = encoded[:BODY_HEAD_BYTES].decode("utf-8", errors="ignore")
+        rest = encoded[BODY_HEAD_BYTES:].decode("utf-8", errors="ignore")
+        # ponytail: first 20 closing lines, 200 chars each; bounds a spammed body.
+        closing = [m.group(0)[:200] for m in CLOSING_LINE_RE.finditer(rest)][:20]
+        if closing:
+            head += "\n\n[closing lines kept from the compacted body]\n" + "\n".join(closing)
         block = (
             f"{BRIEF_HEADING}\n\n(Rendered in the compacted history section above.)"
             if self.rendered_in_history
@@ -336,7 +363,7 @@ class BriefSession:
         return head + note, block
 
     def marker(self) -> str:
-        if self.brief is None:
+        if self.brief is None and self.status != "failed":
             return ""
         try:
             digest = source_digest(self.sections)
