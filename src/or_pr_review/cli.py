@@ -1421,6 +1421,7 @@ def _collect_with_loop(
             replies=github.list_rebase_replies(pr_number, _bot_login(env)),
             comments=github.list_recent_issue_comments(pr_number),
             carried_ids={f"{state.generation}/{finding.id}" for finding in state.prior_findings},
+            ledger_findings=state.prior_findings,
             summary_for_evicted=session.summarize_evicted if session else None,
         )
         print(history.stats_line(), file=sys.stderr)

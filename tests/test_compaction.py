@@ -178,3 +178,77 @@ def test_realistic_fixture_stats_line():
     assert line.startswith("history compaction: before=")
     assert "reviews_duplicate:5" in line
     assert result.bytes_after < result.bytes_before / 4
+
+
+FOOTER = "\n\n---\n🤖 Posted by [Claude Code](https://claude.com/claude-code) on behalf of @dev"
+
+
+def test_footers_stripped_and_settled_clip_keeps_whole_characters():
+    body = "Fixed in c6e3169. " + "é🤖" * 150 + FOOTER
+    text = compact(
+        replies=[("g/r1-1", "dev", body), ("g/r1-2", "dev", "Done." + FOOTER)],
+        comments=[("dev", "See above." + FOOTER)],
+        carried_ids={"g/r1-2"},
+    ).text
+    assert "Posted by" not in text and "---" not in text and "�" not in text
+    assert "Reply to finding g/r1-2 (from dev):\nDone." in text
+    assert "- finding g/r1-1: dev argued Fixed in c6e3169. " in text and "…" in text
+
+
+def test_footer_kept_when_not_a_signature():
+    text = compact(comments=[("dev", "Table\n---\nreal content here")]).text
+    assert "real content here" in text
+
+
+def test_digest_round_prefix_is_consistent():
+    initial = (
+        review("a" * 40)
+        .replace("### Round 2 resolution\n", "")
+        .replace("**Scope:**", "**Mode:** `initial`\n**Scope:**")
+    )
+    unknown = review("b" * 40).replace("### Round 2 resolution\n", "")
+    text = compact(review_bodies=[initial, unknown, review("c" * 40)]).text
+    assert "- round 1 · commit aaaaaaaaaaaa" in text
+    assert "- round ? · commit bbbbbbbbbbbb" in text
+
+
+def ledger(ident, title, severity="bug"):
+    from or_pr_review.loop import LedgerFinding
+
+    return LedgerFinding(ident, severity, "a.py", 3, title, "evidence", "open")
+
+
+def test_newest_review_references_carried_findings_and_keeps_others():
+    body = review("a" * 40, tag="X")  # issues: [bug] "Null deref X", [nit] "Naming X"
+    text = compact(review_bodies=[body], ledger_findings=[ledger("r1-1", "Null deref X")]).text
+    assert "- `r1-1` [bug] Null deref X — see Prior findings" in text
+    assert "body xxx" not in text  # carried finding body replaced
+    assert "#### 🔵 Issue 2 — Naming X" in text and "short" in text  # not in ledger: kept
+    assert "**Verdict:** `fail`" in text
+
+
+def test_reference_matches_updates_tag_and_requires_same_severity():
+    body = review("a" * 40, tag="X").replace("Null deref X", "Renamed title (updates `r2-4`)")
+    text = compact(
+        review_bodies=[body],
+        ledger_findings=[ledger("r2-4", "Old title"), ledger("r9-9", "Naming X", "bug")],
+    ).text
+    assert "- `r2-4` [bug] Old title — see Prior findings" in text
+    assert "#### 🔵 Issue 2 — Naming X" in text  # severity nit != bug: no match
+
+
+def test_pr2305_shaped_review_shrinks_to_ledger_references():
+    from or_pr_review.merge import MergedIssue, format_issue_block
+
+    titles = [f"Finding number {n} about the reconcile path" for n in range(9)]
+    blocks = [
+        format_issue_block(n + 1, MergedIssue(t, "detail " * 270, "bug", "x.ts", 10))
+        for n, t in enumerate(titles)
+    ]
+    body = "## OpenRouter pull-request review\n\n**Verdict:** `issues`\n**Mode:** `initial`\n"
+    body += f"**Commit:** `{'d' * 40}`\n\n### Findings\n\n" + "\n".join(blocks)
+    carried = [ledger(f"r1-{n + 1}", t) for n, t in enumerate(titles)]
+    result = compact(review_bodies=[body], ledger_findings=carried)
+    assert len(body.encode()) > 16_000
+    assert result.bytes_after < 2_000
+    assert result.text.count("see Prior findings") == 9

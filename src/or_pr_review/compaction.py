@@ -9,10 +9,11 @@ from __future__ import annotations
 
 import re
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 
 from or_pr_review.github_ops import STATUS_MARKER
+from or_pr_review.loop import LedgerFinding
 
 MAX_REPLY_CHARS = 2_000
 NEWEST_REVIEW_BYTES = 32_000
@@ -27,6 +28,10 @@ _MARKER_RE = re.compile(r"<!--[\s\S]*?-->")
 _COMMIT_RE = re.compile(r"\*\*Commit:\*\* `([0-9a-fA-F]{7,64})`")
 _VERDICT_RE = re.compile(r"\*\*Verdict:\*\* `([^`\n]+)`")
 _ROUND_RE = re.compile(r"^### Round (\d+) resolution", re.MULTILINE)
+_INITIAL_RE = re.compile(r"\*\*Mode:\*\* `initial`")
+_UPDATES_RE = re.compile(r" \(updates `(r\d{1,3}-\d{1,3})`\)$")
+_BLOCK_END = ("#### ", "### ", "## ", "[Workflow run](", "_Part ")
+_FOOTER_LINE_RE = re.compile(r"(Posted by|Generated with)\b", re.IGNORECASE)
 _ISSUE_RE = re.compile(r"^#### \S+ Issue \d+ — (.+?)(?: \(updates `[^`]*`\))?$")
 _SEVERITY_RE = re.compile(r"`(bug|risk|nit)`")
 _STATUS_PREFIXES = ("Reviewing with OpenRouter",)
@@ -71,13 +76,15 @@ def compact_history(
     replies: list[tuple[str, str, str]],
     comments: list[tuple[str, str]],
     carried_ids: set[str] | None = None,
+    ledger_findings: Sequence[LedgerFinding] = (),
     summary_for_evicted: SummaryHook | None = None,
 ) -> CompactedHistory:
     """Compact history into at most `budget` UTF-8 bytes.
 
     `review_bodies` is None outside rebase scope. A reply is "open" when
     `carried_ids` is None or contains its finding id; others are settled and
-    shrink to one line.
+    shrink to one line. Findings of the newest review that `ledger_findings`
+    already carries collapse to a one-line reference.
     """
     before = sum(_size(body) for body in review_bodies or [])
     before += sum(_size(body) for _, _, body in replies) + sum(_size(b) for _, b in comments)
@@ -87,7 +94,8 @@ def compact_history(
     if review_bodies is not None:
         reviews = _dedupe_reviews(review_bodies, dropped)
         if reviews:
-            sections["latest_review"] = [_clip_head(reviews[-1], NEWEST_REVIEW_BYTES)]
+            latest = _reference_carried(reviews[-1], ledger_findings)
+            sections["latest_review"] = [_clip_head(latest, NEWEST_REVIEW_BYTES)]
             sections["digests"] = [_digest(body) for body in reviews[:-1]]
         preamble = (
             f"Historical bot reviews ({len(review_bodies)} posted, {len(reviews)} after "
@@ -95,18 +103,21 @@ def compact_history(
             "every conclusion."
         )
     for (finding_id, login), (body, earlier) in _group_replies(replies).items():
+        body = _strip_footer(body)
         more = f" (+{earlier} earlier replies)" if earlier else ""
         if carried_ids is None or finding_id in carried_ids:
             sections["open_replies"].append(
                 f"Reply to finding {finding_id} (from {login}){more}:\n{_clip_reply(body)}"
             )
         else:
-            argued = " ".join(body.split())[:SETTLED_ARGUMENT_CHARS]
+            argued = " ".join(body.split())
+            if len(argued) > SETTLED_ARGUMENT_CHARS:
+                argued = argued[:SETTLED_ARGUMENT_CHARS].rstrip() + "…"
             sections["settled_replies"].append(
                 f"- finding {finding_id}: {login} argued {argued}{more}"
             )
     for login, body in comments:
-        cleaned = _clean_comment(body)
+        cleaned = _clean_comment(_strip_footer(body))
         if login == bot_login or not cleaned or _is_status(body):
             dropped["comments_filtered"] = dropped.get("comments_filtered", 0) + 1
             continue
@@ -210,12 +221,75 @@ def _digest(body: str) -> str:
             severity = _SEVERITY_RE.search(meta)
             findings.append(f"[{severity.group(1) if severity else '?'}] {heading.group(1)[:100]}")
     round_match = _ROUND_RE.search(body)
-    parts = [f"round {round_match.group(1)}"] if round_match else []
+    round_number = round_match.group(1) if round_match else "1" if _INITIAL_RE.search(body) else "?"
+    parts = [f"round {round_number}"]
     parts.append(f"commit {commit.group(1)[:12]}" if commit else "commit ?")
     parts.append(f"verdict {verdict.group(1) if verdict else '?'}")
     parts.append(f"{len(findings)} finding(s)" + (": " + "; ".join(findings) if findings else ""))
     text = "- " + " · ".join(parts)
     return text if len(text) <= DIGEST_MAX_CHARS else text[:DIGEST_MAX_CHARS] + "…"
+
+
+def _reference_carried(body: str, findings: Sequence[LedgerFinding]) -> str:
+    """Swap each finding block the ledger already carries for a one-line reference.
+
+    Matches the heading's `(updates id)` tag, else a ledger title that prefixes
+    the heading title (ledger titles may be trimmed) with the same severity.
+    Limit: a prefix match can pair near-identical titles; or-finding ids in the body would fix it.
+    """
+    unused = list(findings)
+    lines, out, index = body.splitlines(), [], 0
+    while index < len(lines):
+        heading = _ISSUE_RE.match(lines[index])
+        if not heading:
+            out.append(lines[index])
+            index += 1
+            continue
+        end = index + 1
+        while end < len(lines) and not lines[end].startswith(_BLOCK_END):
+            end += 1
+        match = _match_finding(lines[index], heading.group(1), lines[index:end], unused)
+        if match is None:
+            out.extend(lines[index:end])
+        else:
+            unused.remove(match)
+            out += [f"- `{match.id}` [{match.severity}] {match.title} — see Prior findings", ""]
+        index = end
+    return "\n".join(out)
+
+
+def _match_finding(
+    heading: str, title: str, block: list[str], findings: list[LedgerFinding]
+) -> LedgerFinding | None:
+    tagged = _UPDATES_RE.search(heading)
+    if tagged:
+        return next((f for f in findings if f.id == tagged.group(1)), None)
+    meta = next((line for line in block[1:] if line.strip()), "")
+    severity = _SEVERITY_RE.search(meta)
+    title = title.replace("\u200b", "")
+    return next(
+        (
+            f
+            for f in findings
+            if severity
+            and f.severity == severity.group(1)
+            and f.title.strip("… ")
+            and title.startswith(f.title.strip("… "))
+        ),
+        None,
+    )
+
+
+def _strip_footer(body: str) -> str:
+    """Drop a trailing `---` signature block of "Posted by"/"Generated with" lines."""
+    lines = body.rstrip().splitlines()
+    for index in range(len(lines) - 1, -1, -1):
+        if lines[index].strip() == "---":
+            tail = [line for line in lines[index + 1 :] if line.strip()]
+            if tail and all(_FOOTER_LINE_RE.search(line) for line in tail):
+                return "\n".join(lines[:index]).rstrip()
+            break
+    return body
 
 
 def _group_replies(
