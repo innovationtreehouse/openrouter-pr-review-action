@@ -114,6 +114,15 @@ def test_later_gemini_generations_keep_signature_protections(model: str) -> None
     assert profile.is_signature_rejection("Request contains an invalid argument.")
 
 
+def test_gemini_4_and_later_omit_the_json_schema_response_format() -> None:
+    newer, _ = base_chat_payload(model="google/gemini-4-argon", response_schema={"name": "r"})
+    older, _ = base_chat_payload(
+        model="google/gemini-3.1-flash-lite", response_schema={"name": "r"}
+    )
+    assert "response_format" not in newer
+    assert older["response_format"]["type"] == "json_schema"
+
+
 def test_provider_policy_centralizes_routing_and_data_controls() -> None:
     assert provider_policy() is None
     assert provider_policy(order=["Baseten"], data_collection="deny", zdr=True) == {

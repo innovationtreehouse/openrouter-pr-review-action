@@ -34,6 +34,7 @@ class ModelProtocolProfile:
     max_response_tokens: int | None = None
     preserve_provider_metadata: bool = False
     serial_tool_calls: bool = False
+    json_schema_output: bool = True
 
     def is_signature_rejection(self, error: str) -> bool:
         if not self.serial_tool_calls:
@@ -49,14 +50,18 @@ class ModelProtocolProfile:
 _GEMINI_MAJOR_RE = re.compile(r"^google/gemini-(\d+)")
 
 
+def _gemini_major(model: str) -> int:
+    match = _GEMINI_MAJOR_RE.match(model)
+    return int(match.group(1)) if match else 0
+
+
 def _gemini_signs_tool_calls(model: str) -> bool:
     """Gemini 3 and later reject tool history with a missing thought signature.
 
     Observed on 3.x and on google/gemini-4-argon (generic INVALID_ARGUMENT after
     several accepted tool turns), so the gate is the generation, not one prefix.
     """
-    match = _GEMINI_MAJOR_RE.match(model)
-    return match is not None and int(match.group(1)) >= 3
+    return _gemini_major(model) >= 3
 
 
 def model_protocol_profile(model: str) -> ModelProtocolProfile:
@@ -68,6 +73,10 @@ def model_protocol_profile(model: str) -> ModelProtocolProfile:
         max_response_tokens=GEMINI_MAX_RESPONSE_TOKENS,
         preserve_provider_metadata=True,
         serial_tool_calls=_gemini_signs_tool_calls(model),
+        # gemini-4-argon rejects any request carrying response_format json_schema
+        # (INVALID_ARGUMENT), so a lane that hit the tool budget could never
+        # finish. Its natural JSON finish already parses; rely on that instead.
+        json_schema_output=_gemini_major(model) < 4,
     )
 
 
@@ -144,11 +153,9 @@ def base_chat_payload(
     """Build fields shared by lane and judge chat-completion requests."""
 
     profile = model_protocol_profile(model)
-    payload: dict[str, Any] = {
-        "model": model,
-        "response_format": {"type": "json_schema", "json_schema": response_schema},
-        "usage": {"include": True},
-    }
+    payload: dict[str, Any] = {"model": model, "usage": {"include": True}}
+    if profile.json_schema_output:
+        payload["response_format"] = {"type": "json_schema", "json_schema": response_schema}
     if profile.max_response_tokens is not None:
         payload["max_tokens"] = profile.max_response_tokens
     if reasoning:
