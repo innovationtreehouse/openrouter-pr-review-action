@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+- Add re-review context compaction. Verify rounds and rebase reviews dedupe and
+  digest earlier bot reviews, group replies, clean comments, and fit history to
+  a priority budget (16 KB verify, 64 KB rebase), counting omissions instead of
+  failing. New `compaction` (`auto`|`off`, default `auto`) and `compaction_model`
+  (default empty) inputs enable an optional cached model brief for PR bodies over
+  2,000 bytes or overflowing history: quotes are validated against the source,
+  the brief is cached in a hidden bot-authored marker keyed by source sha256,
+  the model follows its `model_routes` entry, and any failure falls back to the
+  uncompacted prompt. Stats go to stderr.
+
+- Send no `json_schema` response_format to Gemini 4 and later, which reject it.
+
+- Log the protocol shape (no message content) of a lane request the provider
+  rejected.
+
+- Keep tool calls serial (`parallel_tool_calls: false`) and thought-signature
+  protections on for Gemini 4 as well as Gemini 3 (gated on Gemini 3 and later).
+
 - Add `rebase` scope for divergent follow-ups and explicit rechecks after a
   rewrite. Review the full current PR at all severities with bounded earlier
   reviews and replies, preserving generation and finding IDs. Reassess current

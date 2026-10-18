@@ -13,6 +13,7 @@ import types
 from dataclasses import asdict, dataclass, fields, is_dataclass
 from typing import Any, Literal, Union, get_args, get_origin, get_type_hints
 
+from or_pr_review.brief import BRIEF_MARKER_RE, MAX_MARKER_BYTES
 from or_pr_review.collect import CollectedReview
 from or_pr_review.errors import SchemaError
 from or_pr_review.loop import MAX_REBASE_CONTEXT_BYTES, LoopState
@@ -348,6 +349,9 @@ def restore_context(envelope: object) -> ReviewContext:
         or collected.truncation.original_bytes < 0
         or collected.truncation.embedded_bytes != embedded_bytes
         or collected.truncation.original_bytes < collected.truncation.embedded_bytes
+        or len(collected.body_brief) > 64_000
+        or (collected.brief_marker and not BRIEF_MARKER_RE.fullmatch(collected.brief_marker))
+        or len(collected.brief_marker) > MAX_MARKER_BYTES
     ):
         raise SchemaError("review context contains inconsistent publication metadata")
     policy = collected.review_policy

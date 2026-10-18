@@ -16,6 +16,7 @@ from functools import partial
 from pathlib import Path
 from typing import Any
 
+from or_pr_review.brief import BriefSession
 from or_pr_review.collect import (
     DEFAULT_MAX_DIFF_KB,
     DIVERGED_NOTICE,
@@ -26,11 +27,13 @@ from or_pr_review.collect import (
     parse_scope,
     resolve_mode,
 )
+from or_pr_review.compaction import compact_history
 from or_pr_review.errors import ActionError, SchemaError
 from or_pr_review.github_ops import GitHub, require_full_sha, upsert_status_comment
 from or_pr_review.harness import (
     DEFAULT_LANE_TIMEOUT_SECONDS,
     ProgressFn,
+    openrouter_chat,
     parse_max_tool_turns,
     require_openrouter_key,
     run_lane,
@@ -42,6 +45,8 @@ from or_pr_review.judge import (
     run_llm_judge,
 )
 from or_pr_review.loop import (
+    MAX_REBASE_CONTEXT_BYTES,
+    MAX_REPLIES_BYTES,
     Ledger,
     LoopState,
     apply_round,
@@ -50,8 +55,6 @@ from or_pr_review.loop import (
     encode_ledger,
     latest_ledger,
     merge_resolutions,
-    render_agent_context,
-    render_rebase_context,
     round_report,
 )
 from or_pr_review.merge import MergedIssue, issues_from_single_lane
@@ -112,6 +115,9 @@ _ACTIVE_ENV: dict[str, str] = {}
 # work at 22 minutes so review publication and composite cleanup cannot lose a
 # completed lane at the hard GitHub cancellation boundary (the PR358 failure).
 JOB_BUDGET_SECONDS = 22 * 60
+BRIEF_TIMEOUT_SECONDS = 120
+# Ledger plus a 12 KB brief marker must leave room in the 60 KB review body.
+MAX_LEDGER_WITH_BRIEF = 32_000
 POST_RESERVE_SECONDS = 3 * 60
 JUDGE_SCHEDULING_MARGIN_SECONDS = 5
 JUDGE_BUDGET_SECONDS = 60
@@ -481,7 +487,13 @@ def _prepare_execution(env: dict[str, str]) -> dict[str, Any]:
             raise SchemaError(
                 "head/base identity changed while acquiring the required full-PR deep diff"
             )
-        collected = replace(full, review_policy=collected.review_policy)
+        collected = replace(
+            full,
+            review_policy=collected.review_policy,
+            body=collected.body,
+            body_brief=collected.body_brief,
+            brief_marker=collected.brief_marker,
+        )
     execution = PreparedExecution(
         plan=plan,
         runtime_json=freeze_runtime(env),
@@ -1392,39 +1404,101 @@ def _collect_with_loop(
             )
         collected = full
         state = replace(state, prior_findings=ledger.findings, retired_prior=())
-    agent_replies = ""
+    agent_replies, summarized = "", False
+    # Shared-context roles only: legacy matrix lanes must collect identical contexts.
+    shared = with_replies and env.get("ROLE") in {"all", "setup"}
+    session = _brief_session(env, github, collected, state) if shared else None
     if collected.plan.scope == "rebase" and with_replies:
         bodies = github.list_bot_review_bodies(pr_number, _bot_login(env))
         if latest_ledger(bodies, repo=env["GITHUB_REPOSITORY"], pr_number=pr_number) != ledger:
             raise ActionError("review history changed while acquiring rebase context; retry")
         # History is part of this review's contract. A failed history read must
         # not silently downgrade a rebase into a review without its rebuttals.
-        agent_replies = render_rebase_context(
-            bodies,
-            github.list_rebase_replies(pr_number, _bot_login(env)),
-            github.list_recent_issue_comments(pr_number),
+        history = compact_history(
+            budget=MAX_REBASE_CONTEXT_BYTES,
+            bot_login=_bot_login(env),
+            review_bodies=bodies,
+            replies=github.list_rebase_replies(pr_number, _bot_login(env)),
+            comments=github.list_recent_issue_comments(pr_number),
+            carried_ids={f"{state.generation}/{finding.id}" for finding in state.prior_findings},
+            ledger_findings=state.prior_findings,
+            summary_for_evicted=session.summarize_evicted if session else None,
         )
-        return collected, state, agent_replies
+        print(history.stats_line(), file=sys.stderr)
+        return _apply_brief(session, collected, history.summarized), state, history.text
     if with_replies and state.mode == "verify":
         try:
             # Replies to findings the severity floor retired would reintroduce
             # the retired context and invite re-adjudication; only threads for
             # carried findings (open or disputed) reach the prompt.
             carried_ids = {finding.id for finding in state.prior_findings}
-            agent_replies = render_agent_context(
-                [
+            history = compact_history(
+                budget=MAX_REPLIES_BYTES,
+                bot_login=_bot_login(env),
+                replies=[
                     reply
                     for reply in github.list_finding_replies(pr_number, generation=state.generation)
                     if reply[0] in carried_ids
                 ],
-                github.list_recent_issue_comments(pr_number),
+                comments=github.list_recent_issue_comments(pr_number),
+                summary_for_evicted=session.summarize_evicted if session else None,
             )
+            print(history.stats_line(), file=sys.stderr)
+            agent_replies, summarized = history.text, history.summarized
         except ActionError as exc:
             print(
                 "warning: could not fetch reviewer replies; verifying from "
                 f"commits only: {redact(str(exc))}"
             )
-    return collected, state, agent_replies
+    return _apply_brief(session, collected, summarized), state, agent_replies
+
+
+def _brief_session(
+    env: dict[str, str], github: GitHub, collected: CollectedReview, state: LoopState
+) -> BriefSession | None:
+    """Re-reviews only; an empty compaction_model keeps the deterministic path."""
+    if state.mode != "verify":
+        return None
+    compaction = (env.get("COMPACTION") or "auto").strip().lower()
+    if compaction not in {"auto", "off"}:
+        raise ActionError("compaction must be 'auto' or 'off'")
+    raw_model = (env.get("COMPACTION_MODEL") or "").strip()
+    model = parse_slug(raw_model, what="compaction_model") if raw_model else ""
+    if compaction == "off":
+        model = ""
+    bodies: list[str] = []
+    if model:
+        try:
+            bodies = github.list_bot_review_bodies(collected.pr_number, _bot_login(env))
+        except ActionError:
+            bodies = []
+    timeout = min(_int_env(env, "OPENROUTER_TIMEOUT_SECONDS", 180), BRIEF_TIMEOUT_SECONDS)
+
+    def chat(payload: dict[str, Any]) -> dict[str, Any]:
+        key = require_openrouter_key(env)
+        return openrouter_chat(key, payload, timeout=timeout, deadline=time.monotonic() + timeout)
+
+    return BriefSession(
+        body=collected.body,
+        model=model,
+        chat=chat,
+        cached_bodies=bodies,
+        route=parse_model_routes(env.get("MODEL_ROUTES")).get(model, {}) if model else {},
+        repo=(env.get("GITHUB_REPOSITORY") or "").strip(),
+        pr=collected.pr_number,
+    )
+
+
+def _apply_brief(
+    session: BriefSession | None, collected: CollectedReview, summarized: bool = False
+) -> CollectedReview:
+    if session is None:
+        return collected
+    # The history may have dropped an oversized summary; then the body block renders it.
+    session.rendered_in_history = session.rendered_in_history and summarized
+    body, block = session.compact_body()
+    session.log(block)
+    return replace(collected, body=body, body_brief=block, brief_marker=session.marker())
 
 
 def _collect(env: dict[str, str]) -> CollectedReview:
@@ -1806,6 +1880,9 @@ def _finish(
             pr_number=collected.pr_number,
         )
 
+    # The brief cache rides beside the ledger; drop it before it could crowd the body.
+    if collected.brief_marker and len(hidden_marker or "") <= MAX_LEDGER_WITH_BRIEF:
+        hidden_marker = "\n".join(m for m in (hidden_marker, collected.brief_marker) if m)
     bodies = render_review_parts(
         collected=collected,
         lanes=lanes,

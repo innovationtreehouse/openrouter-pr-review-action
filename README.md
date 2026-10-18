@@ -449,8 +449,8 @@ is reported as a new finding with evidence connecting it to the earlier fix.
 
 Rebase context includes historical bot review bodies and replies to their
 finding threads, including earlier generations, plus recent PR comments.
-History is untrusted evidence, never instructions. The narrative is bounded
-to 64,000 UTF-8 bytes, favoring recent material and visibly marking omissions;
+History is untrusted evidence, never instructions. It is bounded to 64,000
+UTF-8 bytes and compacted as described under "Re-review context compaction";
 the current ledger remains separate. A history fetch failure or a detected
 head, base, or ledger change during collection fails the review for retry.
 Prepared matrix runs freeze this context so every lane sees the same snapshot.
@@ -458,6 +458,53 @@ Prepared matrix runs freeze this context so every lane sees the same snapshot.
 This scope does not promise a prompt-cache hit. Provider caching depends on
 matching prompt prefixes, routing, and retention; changed diffs and history can
 invalidate reuse. Budget for a full review and measure cached-token usage.
+
+#### Re-review context compaction
+
+Verify rounds and rebase reviews compact the history they feed the reviewers.
+Compaction never fails a review: overflow drops the lowest-priority items and
+the prompt says how many were omitted.
+
+- **What is compacted.** In rebase scope, duplicate bot reviews of one commit
+  collapse to the newest, older reviews become one-line digests, and the newest
+  review is clipped to 32,000 bytes. Replies are grouped per finding and author
+  (newest kept, earlier ones counted); replies on settled findings shrink to one
+  line. PR comments are cleaned (hidden markers removed, long code blocks
+  shortened) and the bot's own comments and status comments are dropped.
+- **Budget and priority.** 16,000 bytes in verify rounds (replies and comments
+  only), 64,000 bytes in rebase scope. Space goes first to replies on carried
+  findings, then PR comments, the newest earlier review, older digests, and
+  last replies on settled findings.
+- **Model brief (optional).** With `compaction: auto` and a `compaction_model`,
+  a re-review makes one extra request when the PR body exceeds 2,000 bytes or
+  the history overflows its budget. It returns a structured brief (intent,
+  claims, non-goals, test claims, open questions, finding arguments). Every
+  item must carry a quote that appears verbatim in the source; items whose
+  quote does not are dropped. A compacted body is replaced by its first 600
+  bytes plus the brief; evicted history is replaced by the brief's rendering.
+  Initial reviews never use it, and neither do legacy matrix lanes.
+- **Cache.** The brief is stored in a hidden bot-authored marker on the posted
+  review, keyed by the sha256 of its source text, and reused while the source is
+  unchanged. A marker over 12,000 bytes, or a ledger too large to leave room for
+  it, is not written.
+- **Routing.** The request uses the `compaction_model` entry in `model_routes`
+  (provider pin, service tier) when there is one, and a timeout of
+  `OPENROUTER_TIMEOUT_SECONDS` capped at 120 seconds.
+- **Failure.** Any error, invalid JSON, or empty brief falls back to the full
+  body and the deterministic history. The review proceeds.
+
+Operators see these stderr lines:
+
+```text
+history compaction: before=<bytes> after=<bytes> dropped=<section:count,...|0>
+review brief: <skipped|reused|built|failed> (source_bytes=<n>, brief_bytes=<n>)
+```
+
+`dropped` counts evicted items per section, plus `comments_filtered`. A failed
+summary also logs `warning: history summary failed; omitting it`.
+
+To stop the model brief, set `compaction: off` or leave `compaction_model`
+empty. The deterministic compaction and its budgets always apply.
 
 Follow-up reviewers put incomplete fixes in the existing finding's resolution.
 Additional evidence can name `prior_finding_id` to retain that open finding's ID;
@@ -530,6 +577,8 @@ for your account and action revision.
 | `lane_model` | _empty_ | Optional validated model override for `role=lane`. Normally supplied through matrix plumbing. |
 | `lane_results_dir` | _empty_ | Lane artifact output/input directory used by `role=lane` and `role=judge`. Normally supplied by orchestration. |
 | `head_sha` | _empty_ | Full reviewed commit SHA resolved by reusable-workflow setup. Internal lane/judge plumbing; pull-request runs use the event head by default. |
+| `compaction` | `auto` | `auto` or `off`. `off` disables the model brief on re-reviews; deterministic compaction still applies. See "Re-review context compaction". |
+| `compaction_model` | _empty_ | OpenRouter slug that writes the re-review brief and summarizes evicted history. Empty skips the brief. Uses its `model_routes` entry if present. |
 | `bot_login` | `github-actions[bot]` | Identity the action posts reviews as. Review-loop ledger state is only trusted from this login. Change it when `github_token` is a PAT or App token. |
 | `persona` | _empty_ | **Reserved, unused in v1.** Future single-persona runs should skip the judge. |
 

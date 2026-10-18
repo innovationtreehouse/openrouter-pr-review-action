@@ -51,11 +51,8 @@ TRIMMED_TITLE = 100
 LEDGER_V1_TITLE_COMPAT_LIMIT = 300
 LEDGER_V1_EVIDENCE_COMPAT_LIMIT = 616
 MAX_LEDGER_MODELS = 8
-MAX_REPLY_CHARS = 2_000
 MAX_REPLIES_BYTES = 16_000
 MAX_REBASE_CONTEXT_BYTES = 64_000
-OMISSION_MARKER = "…[older entries omitted]\n"
-_CONTEXT_SEPARATOR = "\n\n"
 
 _FINDING_ID_RE = re.compile(r"^r\d{1,3}-\d{1,3}$")
 _GENERATION_RE = re.compile(r"^[0-9a-f]{0,12}$")
@@ -413,12 +410,12 @@ def has_ledger_marker(body: str) -> bool:
 
 
 def extract_ledger(body: str, *, repo: str, pr_number: int) -> Ledger | None:
-    """Decode the newest valid ledger marker bound to this repo/PR, else None."""
-    for match in reversed(list(_LEDGER_RE.finditer(body))):
-        ledger = _decode(match.group(1), repo=repo, pr_number=pr_number)
-        if ledger is not None:
-            return ledger
-    return None
+    """Decode the body's FIRST ledger marker (the publisher's header position).
+
+    A marker echoed later, e.g. in finding text, must never shadow the header one.
+    """
+    match = _LEDGER_RE.search(body)
+    return _decode(match.group(1), repo=repo, pr_number=pr_number) if match else None
 
 
 def latest_ledger(bodies: list[str], *, repo: str, pr_number: int) -> Ledger | None:
@@ -524,84 +521,6 @@ def _decode_finding(item: object) -> LedgerFinding | None:
         status=status,
         models=tuple(models),
     )
-
-
-def render_agent_context(
-    finding_replies: list[tuple[str, str, str]],
-    issue_comments: list[tuple[str, str]],
-) -> str:
-    """Render comment-thread replies and PR comments into a bounded prompt block.
-
-    Finding replies are the adjudication signal, so they get the byte budget
-    first; issue comments fill what remains. Both clip from the FRONT
-    (dropping the oldest entries) so overflow never evicts the newest reply.
-    """
-    reply_lines: list[str] = []
-    for finding_id, login, body in finding_replies:
-        reply_lines.append(f"Reply to finding {finding_id} (from {login}):")
-        reply_lines.append(_clip_reply(body))
-        reply_lines.append("")
-    comment_lines: list[str] = []
-    for login, body in issue_comments:
-        comment_lines.append(f"PR comment (from {login}):")
-        comment_lines.append(_clip_reply(body))
-        comment_lines.append("")
-    reply_text = _clip_tail("\n".join(reply_lines).strip(), MAX_REPLIES_BYTES)
-    reply_bytes = len(reply_text.encode("utf-8"))
-    remaining = MAX_REPLIES_BYTES - reply_bytes
-    comment_source = "\n".join(comment_lines).strip()
-    if comment_source and reply_text:
-        remaining -= len(_CONTEXT_SEPARATOR.encode("utf-8"))
-    comment_text = _clip_tail(comment_source, max(0, remaining))
-    parts = [part for part in (reply_text, comment_text) if part]
-    return _CONTEXT_SEPARATOR.join(parts)
-
-
-def render_rebase_context(
-    review_bodies: list[str],
-    finding_replies: list[tuple[str, str, str]],
-    issue_comments: list[tuple[str, str]],
-) -> str:
-    """Bounded historical evidence, including fixes absent from today's ledger.
-
-    The caller supplies only reviews from the configured bot. Their text and
-    all replies remain untrusted prompt data, never a source of current state.
-    Hidden ledger/receipt encodings are unnecessary in this narrative context.
-    """
-    reviews = [re.sub(r"<!--[\s\S]*?-->", "", body).strip() for body in review_bodies]
-    reviews = [body for body in reviews if body]
-    heading = (
-        f"Historical bot reviews ({len(reviews)} available, oldest first). "
-        "These describe earlier code; current code must establish every conclusion.\n\n"
-    )
-    review_text = _clip_tail("\n\n--- Earlier review ---\n\n".join(reviews), 47_500)
-    replies = render_agent_context(finding_replies, issue_comments)
-    result = heading + review_text + "\n\nHistorical replies and PR discussion:\n\n" + replies
-    if len(result.encode("utf-8")) > MAX_REBASE_CONTEXT_BYTES:
-        raise ActionError("rebase review history exceeds its context budget")
-    return result
-
-
-def _clip_tail(text: str, max_bytes: int) -> str:
-    """Keep the newest (trailing) portion of an oldest-first block."""
-    if max_bytes <= 0:
-        return ""
-    encoded = text.encode("utf-8")
-    if len(encoded) <= max_bytes:
-        return text
-    marker = OMISSION_MARKER.encode("utf-8")
-    content_budget = max_bytes - len(marker)
-    if content_budget <= 0:
-        return encoded[-max_bytes:].decode("utf-8", errors="ignore")
-    clipped = encoded[-content_budget:].decode("utf-8", errors="ignore")
-    return OMISSION_MARKER + clipped
-
-
-def _clip_reply(body: str) -> str:
-    text = body.strip()
-    if len(text) > MAX_REPLY_CHARS:
-        return text[:MAX_REPLY_CHARS] + "…[clipped]"
-    return text
 
 
 def _resolution_line(finding: LedgerFinding, status: str, note: str) -> str:
