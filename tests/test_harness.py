@@ -1310,6 +1310,32 @@ def test_unsolicited_tool_calls_are_stubbed_not_fatal(tmp_path: Path) -> None:
     assert stubs and stubs[-1]["tool_call_id"] == "call_1"
 
 
+def test_gemini_4_budget_finish_sends_no_json_schema(tmp_path: Path) -> None:
+    # gemini-4-argon rejected every budget finish that carried response_format.
+    (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
+    payloads: list[dict] = []
+
+    def chat(payload: dict) -> dict:
+        payloads.append(payload)
+        if len(payloads) == 1:
+            return _gemini_tool_reply()
+        assert payload["tool_choice"] == "none"
+        return _findings_reply()
+
+    result = run_lane(
+        model="google/gemini-4-argon",
+        messages=[{"role": "user", "content": "review"}],
+        api_key="sk-test",
+        workspace=tmp_path,
+        chat=chat,
+        max_tool_turns=1,
+    )
+    assert result.ok
+    assert result.salvaged is not True
+    assert len(payloads) == 2
+    assert not any("response_format" in payload for payload in payloads)
+
+
 def test_malformed_finish_gets_one_schema_enforced_retry(tmp_path: Path) -> None:
     (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
     payloads: list[dict] = []
