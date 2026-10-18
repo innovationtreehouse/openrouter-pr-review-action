@@ -16,6 +16,7 @@ from functools import partial
 from pathlib import Path
 from typing import Any
 
+from or_pr_review.brief import BriefSession
 from or_pr_review.collect import (
     DEFAULT_MAX_DIFF_KB,
     DIVERGED_NOTICE,
@@ -31,6 +32,7 @@ from or_pr_review.github_ops import GitHub, require_full_sha, upsert_status_comm
 from or_pr_review.harness import (
     DEFAULT_LANE_TIMEOUT_SECONDS,
     ProgressFn,
+    openrouter_chat,
     parse_max_tool_turns,
     require_openrouter_key,
     run_lane,
@@ -112,6 +114,9 @@ _ACTIVE_ENV: dict[str, str] = {}
 # work at 22 minutes so review publication and composite cleanup cannot lose a
 # completed lane at the hard GitHub cancellation boundary (the PR358 failure).
 JOB_BUDGET_SECONDS = 22 * 60
+BRIEF_TIMEOUT_SECONDS = 120
+# Ledger plus a 12 KB brief marker must leave room in the 60 KB review body.
+MAX_LEDGER_WITH_BRIEF = 32_000
 POST_RESERVE_SECONDS = 3 * 60
 JUDGE_SCHEDULING_MARGIN_SECONDS = 5
 JUDGE_BUDGET_SECONDS = 60
@@ -481,7 +486,13 @@ def _prepare_execution(env: dict[str, str]) -> dict[str, Any]:
             raise SchemaError(
                 "head/base identity changed while acquiring the required full-PR deep diff"
             )
-        collected = replace(full, review_policy=collected.review_policy)
+        collected = replace(
+            full,
+            review_policy=collected.review_policy,
+            body=collected.body,
+            body_brief=collected.body_brief,
+            brief_marker=collected.brief_marker,
+        )
     execution = PreparedExecution(
         plan=plan,
         runtime_json=freeze_runtime(env),
@@ -1393,6 +1404,9 @@ def _collect_with_loop(
         collected = full
         state = replace(state, prior_findings=ledger.findings, retired_prior=())
     agent_replies = ""
+    # Shared-context roles only: legacy matrix lanes must collect identical contexts.
+    shared = with_replies and env.get("ROLE") in {"all", "setup"}
+    session = _brief_session(env, github, collected, state) if shared else None
     if collected.plan.scope == "rebase" and with_replies:
         bodies = github.list_bot_review_bodies(pr_number, _bot_login(env))
         if latest_ledger(bodies, repo=env["GITHUB_REPOSITORY"], pr_number=pr_number) != ledger:
@@ -1404,7 +1418,7 @@ def _collect_with_loop(
             github.list_rebase_replies(pr_number, _bot_login(env)),
             github.list_recent_issue_comments(pr_number),
         )
-        return collected, state, agent_replies
+        return _apply_brief(session, collected), state, agent_replies
     if with_replies and state.mode == "verify":
         try:
             # Replies to findings the severity floor retired would reintroduce
@@ -1424,7 +1438,50 @@ def _collect_with_loop(
                 "warning: could not fetch reviewer replies; verifying from "
                 f"commits only: {redact(str(exc))}"
             )
-    return collected, state, agent_replies
+    return _apply_brief(session, collected), state, agent_replies
+
+
+def _brief_session(
+    env: dict[str, str], github: GitHub, collected: CollectedReview, state: LoopState
+) -> BriefSession | None:
+    """Re-reviews only; an empty compaction_model keeps the deterministic path."""
+    if state.mode != "verify":
+        return None
+    compaction = (env.get("COMPACTION") or "auto").strip().lower()
+    if compaction not in {"auto", "off"}:
+        raise ActionError("compaction must be 'auto' or 'off'")
+    raw_model = (env.get("COMPACTION_MODEL") or "").strip()
+    model = parse_slug(raw_model, what="compaction_model") if raw_model else ""
+    if compaction == "off":
+        model = ""
+    bodies: list[str] = []
+    if model:
+        try:
+            bodies = github.list_bot_review_bodies(collected.pr_number, _bot_login(env))
+        except ActionError:
+            bodies = []
+    timeout = min(_int_env(env, "OPENROUTER_TIMEOUT_SECONDS", 180), BRIEF_TIMEOUT_SECONDS)
+
+    def chat(payload: dict[str, Any]) -> dict[str, Any]:
+        key = require_openrouter_key(env)
+        return openrouter_chat(key, payload, timeout=timeout, deadline=time.monotonic() + timeout)
+
+    return BriefSession(
+        body=collected.body,
+        model=model,
+        chat=chat,
+        cached_bodies=bodies,
+        repo=(env.get("GITHUB_REPOSITORY") or "").strip(),
+        pr=collected.pr_number,
+    )
+
+
+def _apply_brief(session: BriefSession | None, collected: CollectedReview) -> CollectedReview:
+    if session is None:
+        return collected
+    body, block = session.compact_body()
+    session.log(block)
+    return replace(collected, body=body, body_brief=block, brief_marker=session.marker())
 
 
 def _collect(env: dict[str, str]) -> CollectedReview:
@@ -1806,6 +1863,9 @@ def _finish(
             pr_number=collected.pr_number,
         )
 
+    # The brief cache rides beside the ledger; drop it before it could crowd the body.
+    if collected.brief_marker and len(hidden_marker or "") <= MAX_LEDGER_WITH_BRIEF:
+        hidden_marker = "\n".join(m for m in (hidden_marker, collected.brief_marker) if m)
     bodies = render_review_parts(
         collected=collected,
         lanes=lanes,
