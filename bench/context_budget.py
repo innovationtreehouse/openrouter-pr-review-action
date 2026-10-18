@@ -6,9 +6,7 @@ printed or stored. Verify mode is modelled as a rebase review (the largest case)
 
     PYTHONPATH=src python bench/context_budget.py --repo o/r --pr 1 --pr 2 [--impl]
 
---impl: if or_pr_review.compaction.compact_history exists, also report its
-output size for the history block (called as compact_history(bodies, replies,
-comments) -> str; adjust the call when that module lands).
+--impl: also run compaction.compact_history (rebase 64KB, verify 16KB, no model).
 """
 
 from __future__ import annotations
@@ -25,6 +23,97 @@ from or_pr_review.github_ops import GitHub
 BOT = "github-actions[bot]"
 MAX_DIFF = 300 * 1024  # DEFAULT_MAX_DIFF_KB embed cap
 COMMIT_RE = re.compile(r"\*\*Commit:\*\*\s*`([0-9a-f]{7,40})`")
+
+
+# Baseline renderers vendored verbatim from fork main 29a5faa (loop.py); the
+# compaction branch removed them from the action.
+import re  # noqa: E402
+
+from or_pr_review.errors import ActionError  # noqa: E402
+
+MAX_REPLIES_BYTES = L.MAX_REPLIES_BYTES
+MAX_REBASE_CONTEXT_BYTES = L.MAX_REBASE_CONTEXT_BYTES
+MAX_REPLY_CHARS = 2_000
+OMISSION_MARKER = "…[older entries omitted]\n"
+_CONTEXT_SEPARATOR = "\n\n"
+
+
+def render_agent_context(
+    finding_replies: list[tuple[str, str, str]],
+    issue_comments: list[tuple[str, str]],
+) -> str:
+    """Render comment-thread replies and PR comments into a bounded prompt block.
+
+    Finding replies are the adjudication signal, so they get the byte budget
+    first; issue comments fill what remains. Both clip from the FRONT
+    (dropping the oldest entries) so overflow never evicts the newest reply.
+    """
+    reply_lines: list[str] = []
+    for finding_id, login, body in finding_replies:
+        reply_lines.append(f"Reply to finding {finding_id} (from {login}):")
+        reply_lines.append(_clip_reply(body))
+        reply_lines.append("")
+    comment_lines: list[str] = []
+    for login, body in issue_comments:
+        comment_lines.append(f"PR comment (from {login}):")
+        comment_lines.append(_clip_reply(body))
+        comment_lines.append("")
+    reply_text = _clip_tail("\n".join(reply_lines).strip(), MAX_REPLIES_BYTES)
+    reply_bytes = len(reply_text.encode("utf-8"))
+    remaining = MAX_REPLIES_BYTES - reply_bytes
+    comment_source = "\n".join(comment_lines).strip()
+    if comment_source and reply_text:
+        remaining -= len(_CONTEXT_SEPARATOR.encode("utf-8"))
+    comment_text = _clip_tail(comment_source, max(0, remaining))
+    parts = [part for part in (reply_text, comment_text) if part]
+    return _CONTEXT_SEPARATOR.join(parts)
+
+
+def render_rebase_context(
+    review_bodies: list[str],
+    finding_replies: list[tuple[str, str, str]],
+    issue_comments: list[tuple[str, str]],
+) -> str:
+    """Bounded historical evidence, including fixes absent from today's ledger.
+
+    The caller supplies only reviews from the configured bot. Their text and
+    all replies remain untrusted prompt data, never a source of current state.
+    Hidden ledger/receipt encodings are unnecessary in this narrative context.
+    """
+    reviews = [re.sub(r"<!--[\s\S]*?-->", "", body).strip() for body in review_bodies]
+    reviews = [body for body in reviews if body]
+    heading = (
+        f"Historical bot reviews ({len(reviews)} available, oldest first). "
+        "These describe earlier code; current code must establish every conclusion.\n\n"
+    )
+    review_text = _clip_tail("\n\n--- Earlier review ---\n\n".join(reviews), 47_500)
+    replies = render_agent_context(finding_replies, issue_comments)
+    result = heading + review_text + "\n\nHistorical replies and PR discussion:\n\n" + replies
+    if len(result.encode("utf-8")) > MAX_REBASE_CONTEXT_BYTES:
+        raise ActionError("rebase review history exceeds its context budget")
+    return result
+
+
+def _clip_tail(text: str, max_bytes: int) -> str:
+    """Keep the newest (trailing) portion of an oldest-first block."""
+    if max_bytes <= 0:
+        return ""
+    encoded = text.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return text
+    marker = OMISSION_MARKER.encode("utf-8")
+    content_budget = max_bytes - len(marker)
+    if content_budget <= 0:
+        return encoded[-max_bytes:].decode("utf-8", errors="ignore")
+    clipped = encoded[-content_budget:].decode("utf-8", errors="ignore")
+    return OMISSION_MARKER + clipped
+
+
+def _clip_reply(body: str) -> str:
+    text = body.strip()
+    if len(text) > MAX_REPLY_CHARS:
+        return text[:MAX_REPLY_CHARS] + "…[clipped]"
+    return text
 
 
 def b(s: str) -> int:
@@ -54,10 +143,10 @@ def measure(repo: str, pr: int, impl: bool) -> dict:
                             prior_findings=ledger.findings, generation=ledger.generation)
     replies_rebase = gh.list_rebase_replies(pr, BOT)
     comments = gh.list_recent_issue_comments(pr)
-    history = L.render_rebase_context(bodies, replies_rebase, comments)
+    history = render_rebase_context(bodies, replies_rebase, comments)
     carried = {f.id for f in state.prior_findings} if state else set()
     verify_replies_raw = gh.list_finding_replies(pr, generation=state.generation) if state else []
-    verify_ctx = L.render_agent_context([r for r in verify_replies_raw if r[0] in carried], comments)
+    verify_ctx = render_agent_context([r for r in verify_replies_raw if r[0] in carried], comments)
 
     # Duplicate bot reviews of the same commit, and bytes dropped by _clip_tail.
     shas = [m.group(1) if (m := COMMIT_RE.search(x)) else None for x in bodies]
@@ -68,7 +157,7 @@ def measure(repo: str, pr: int, impl: bool) -> dict:
     reviews_part = history.split("\n\nHistorical replies and PR discussion:")[0]
     kept = b(reviews_part) - b(f"Historical bot reviews ({len(stripped)} available, oldest first). "
                                "These describe earlier code; current code must establish every conclusion.\n\n")
-    kept -= b(L.OMISSION_MARKER) if L.OMISSION_MARKER in reviews_part else 0
+    kept -= b(OMISSION_MARKER) if OMISSION_MARKER in reviews_part else 0
     dropped = max(0, pre - kept)
 
     collected = CollectedReview(
@@ -96,17 +185,23 @@ def measure(repo: str, pr: int, impl: bool) -> dict:
     }
     # Without a ledger the action stays in initial mode and sends no history.
     hist_if_loop = b(history)
+    comp = None
     if impl:
-        try:
-            from or_pr_review import compaction
+        from or_pr_review import compaction
 
-            rows["history AFTER compaction"] = b(compaction.compact_history(bodies, replies_rebase, comments))
-        except ImportError:
-            rows["history AFTER compaction"] = -1
+        comp = compaction.compact_history(
+            budget=L.MAX_REBASE_CONTEXT_BYTES, bot_login=BOT, review_bodies=bodies,
+            replies=replies_rebase, comments=comments, carried_ids={f"{state.generation}/{i}" for i in carried} if state else None,
+            summary_for_evicted=None)  # deterministic only, no model calls
+        vcomp = compaction.compact_history(
+            budget=L.MAX_REPLIES_BYTES, bot_login=BOT, replies=[r for r in verify_replies_raw if r[0] in carried],
+            comments=comments, summary_for_evicted=None)
+        rows["rebase history AFTER compaction"] = comp.bytes_after
+        rows["verify replies AFTER compaction"] = vcomp.bytes_after
     user_total = b(user)
     return dict(pr=pr, rows=rows, user_total=user_total, system=b(system), ledger=bool(ledger),
                 n_bot=len(bodies), dup=dup, dropped=dropped, diff_raw=diff_raw,
-                hist_if_loop=hist_if_loop, adds=meta["additions"], dels=meta["deletions"],
+                hist_if_loop=hist_if_loop, comp=comp, adds=meta["additions"], dels=meta["deletions"],
                 n_replies=len(replies_rebase), n_comments=len(comments))
 
 
@@ -136,9 +231,16 @@ def main() -> None:
     ap.add_argument("--repo", required=True)
     ap.add_argument("--pr", type=int, action="append", required=True)
     ap.add_argument("--impl", action="store_true", help="also size or_pr_review.compaction.compact_history if present")
+    ap.add_argument("--dump", help="dir to write compacted history text (private content!)")
     a = ap.parse_args()
     for pr in a.pr:
-        print(render(measure(a.repo, pr, a.impl)))
+        r = measure(a.repo, pr, a.impl)
+        print(render(r))
+        if r["comp"]:
+            c = r["comp"]
+            print(f"compaction: {c.stats_line()}\n")
+            if a.dump:
+                open(f"{a.dump}/compacted-{pr}.txt", "w").write(c.text)
 
 
 if __name__ == "__main__":
