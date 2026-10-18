@@ -9,6 +9,7 @@ from or_pr_review.models import (
     DEFAULT_JUDGE_MODEL,
     DEFAULT_MODEL,
     GEMINI_MAX_RESPONSE_TOKENS,
+    MAX_RESPONSE_TOKENS,
     LANE_CAP,
     ModelProtocolProfile,
     base_chat_payload,
@@ -92,7 +93,9 @@ def test_matrix_json_includes_indexes() -> None:
 
 
 def test_model_protocol_profile_is_model_family_policy() -> None:
-    assert model_protocol_profile("example/model") == ModelProtocolProfile()
+    assert model_protocol_profile("example/model") == ModelProtocolProfile(
+        max_response_tokens=MAX_RESPONSE_TOKENS
+    )
     assert model_protocol_profile("google/gemini-2.5-pro") == ModelProtocolProfile(
         max_response_tokens=GEMINI_MAX_RESPONSE_TOKENS,
         preserve_provider_metadata=True,

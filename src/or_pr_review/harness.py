@@ -102,9 +102,10 @@ MISSING_SIGNATURE_FINALIZE_NOTICE = (
 class OpenRouterHTTPError(LaneError):
     """Terminal OpenRouter HTTP error with aggregate-safe routing metadata."""
 
-    def __init__(self, message: str, *, provider: str | None) -> None:
+    def __init__(self, message: str, *, provider: str | None, status: int | None = None) -> None:
         super().__init__(message)
         self.provider = provider
+        self.status = status
 
 
 # Bound on stub-repair rounds if a model keeps emitting tool calls after the
@@ -302,6 +303,7 @@ def openrouter_chat(
                     raise OpenRouterHTTPError(
                         f"{deadline_error}; last OpenRouter HTTP {exc.code}: {redact(err_body)}",
                         provider=provider,
+                        status=exc.code,
                     ) from exc
                 continue
             # OpenRouter's zero-completion insurance makes a terminal HTTP
@@ -310,6 +312,7 @@ def openrouter_chat(
             raise OpenRouterHTTPError(
                 f"OpenRouter HTTP {exc.code}: {redact(err_body)}",
                 provider=provider,
+                status=exc.code,
             ) from exc
         except TimeoutError as exc:
             if stats is not None:
@@ -902,7 +905,10 @@ def _run_loop(
                     # from the embedded diff even if no tool round completed.
                     enter_salvage("deadline", DEADLINE_FINALIZE_NOTICE)
                     continue
-                if state.turns > 0 and not state.salvage_attempted:
+                # 402 means the key or account is out of credit; a salvage
+                # request would only be refused the same way.
+                out_of_credit = getattr(exc, "status", None) == 402
+                if state.turns > 0 and not state.salvage_attempted and not out_of_credit:
                     # Salvage: a mid-loop failure that survived the HTTP
                     # retries must not discard every gathered observation.
                     # Ask for a final JSON answer from the evidence so far.
