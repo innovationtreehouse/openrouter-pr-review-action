@@ -446,6 +446,9 @@ def _user_prompt(
     profile_block = _profiles_block(matched_profiles(path_profiles, profile_paths))
     policy_block = review_policy_block(collected)
     guidance_block = notice_block + extra_block + profile_block + policy_block + loop_block
+    # Re-reviews may carry a compacted body: a fenced brief plus the body's head.
+    brief_block = f"{collected.body_brief}\n\n" if collected.body_brief else ""
+    body_note = " (head only; compacted into the brief above)" if collected.body_brief else ""
 
     return f"""## Review metadata
 
@@ -460,7 +463,7 @@ def _user_prompt(
 
 {_fence(collected.title)}
 
-## Untrusted PR body
+{brief_block}## Untrusted PR body{body_note}
 
 {_fence(collected.body or "(empty)")}
 

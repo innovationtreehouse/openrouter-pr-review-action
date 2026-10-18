@@ -7,8 +7,9 @@ from dataclasses import replace
 import pytest
 
 from or_pr_review.collect import CollectedReview, DiffPlan, Truncation
+from or_pr_review.compaction import compact_history
 from or_pr_review.errors import SchemaError
-from or_pr_review.loop import LoopState, render_agent_context
+from or_pr_review.loop import LoopState
 from or_pr_review.review_context import (
     CONTEXT_VERSION,
     FROZEN_RUNTIME_KEYS,
@@ -246,7 +247,9 @@ def test_prepared_context_agent_replies_roundtrip_near_cap() -> None:
         ("r1-2", "dev", "NEWEST reply " + "🔍" * 500),
     ]
     comments = [(f"user{n}", f"comment {n} " + "y" * 1_500) for n in range(8)]
-    rendered = render_agent_context(replies, comments)
+    rendered = compact_history(
+        budget=16_000, bot_login="bot", replies=replies, comments=comments
+    ).text
     assert "NEWEST reply" in rendered
     assert len(rendered.encode("utf-8")) <= 16_000
     execution = _execution(agent_replies=rendered)

@@ -449,8 +449,11 @@ is reported as a new finding with evidence connecting it to the earlier fix.
 
 Rebase context includes historical bot review bodies and replies to their
 finding threads, including earlier generations, plus recent PR comments.
-History is untrusted evidence, never instructions. The narrative is bounded
-to 64,000 UTF-8 bytes, favoring recent material and visibly marking omissions;
+History is untrusted evidence, never instructions. It is compacted
+deterministically: duplicate reviews of one commit collapse to the newest,
+older reviews become one-line digests, and replies keep the newest per finding
+and author. The narrative is bounded to 64,000 UTF-8 bytes; overflow evicts
+the lowest-priority material and visibly counts omissions rather than failing;
 the current ledger remains separate. A history fetch failure or a detected
 head, base, or ledger change during collection fails the review for retry.
 Prepared matrix runs freeze this context so every lane sees the same snapshot.
@@ -530,6 +533,8 @@ for your account and action revision.
 | `lane_model` | _empty_ | Optional validated model override for `role=lane`. Normally supplied through matrix plumbing. |
 | `lane_results_dir` | _empty_ | Lane artifact output/input directory used by `role=lane` and `role=judge`. Normally supplied by orchestration. |
 | `head_sha` | _empty_ | Full reviewed commit SHA resolved by reusable-workflow setup. Internal lane/judge plumbing; pull-request runs use the event head by default. |
+| `compaction` | `auto` | `auto` or `off`. On re-reviews, `auto` replaces a PR body over 2,000 bytes with a model-generated brief (verbatim-quoted, cached in a hidden marker on the bot's review) plus its first 600 bytes, when `compaction_model` is set. Any brief failure falls back to the full body. |
+| `compaction_model` | _empty_ | OpenRouter slug for the re-review brief. Empty skips the model brief. The same request summarizes history evicted by compaction, and a `model_routes` entry for this slug applies to it as it does to lanes. |
 | `bot_login` | `github-actions[bot]` | Identity the action posts reviews as. Review-loop ledger state is only trusted from this login. Change it when `github_token` is a PAT or App token. |
 | `persona` | _empty_ | **Reserved, unused in v1.** Future single-persona runs should skip the judge. |
 

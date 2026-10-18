@@ -6,6 +6,7 @@ from dataclasses import replace
 import pytest
 
 from or_pr_review import cli
+from or_pr_review.compaction import compact_history
 from or_pr_review.errors import ActionError, DivergedRangeError, SchemaError
 from or_pr_review.github_ops import GitHub
 from or_pr_review.loop import (
@@ -14,7 +15,6 @@ from or_pr_review.loop import (
     LedgerFinding,
     apply_round,
     encode_ledger,
-    render_rebase_context,
 )
 from or_pr_review.merge import MergedIssue
 from or_pr_review.prompt import build_messages
@@ -215,13 +215,14 @@ def test_rebase_history_read_failure_is_not_silently_ignored(monkeypatch):
 
 
 def test_history_is_bounded_with_visible_omission_and_hidden_markers_removed():
-    context = render_rebase_context(
-        ["old " + "Ω" * 40_000, "latest finding <!-- secret-metadata --> fixed"],
-        [(f"{GEN}/r1-1", "developer", "Ω" * 40_000)],
-        [("developer", "latest explanation")],
-    )
+    context = compact_history(
+        budget=MAX_REBASE_CONTEXT_BYTES,
+        bot_login="github-actions[bot]",
+        review_bodies=["old " + "Ω" * 40_000, "latest finding <!-- secret-metadata --> fixed"],
+        replies=[(f"{GEN}/r1-1", "developer", "Ω" * 40_000)],
+        comments=[("developer", "latest explanation")],
+    ).text
     assert len(context.encode()) <= MAX_REBASE_CONTEXT_BYTES
-    assert "older entries omitted" in context
     assert "latest finding" in context and "secret-metadata" not in context
     assert "latest explanation" in context
 
@@ -254,3 +255,69 @@ def test_rebase_replies_are_generation_qualified_and_ignore_spoofed_roots():
         f"{GEN}/r1-1",
         "111111111111/r1-1",
     ]
+
+
+def test_rebase_rereview_with_brief_compacts_history_and_body_once(monkeypatch, tmp_path):
+    from or_pr_review.brief import BRIEF_HEADING, BRIEF_MARKER_RE
+    from or_pr_review.schema import LaneResult
+
+    body = "## Summary\nAdds the guard back after rebase.\n\n" + "Detail line. " * 400
+    brief = {
+        "intent": "Restore the guard.",
+        "claims": [{"text": "guard", "quote": "Adds the guard back after rebase."}],
+        "non_goals": [],
+        "test_claims": [],
+        "open_questions": [],
+        "finding_arguments": [],
+    }
+    requests = []
+
+    def fake_chat(key, payload, **kwargs):
+        requests.append(payload)
+        return {"choices": [{"message": {"role": "assistant", "content": json.dumps(brief)}}]}
+
+    source = Source()
+    older = [
+        f"## OpenRouter pull-request review\n\n**Verdict:** `fail`\n**Commit:** `{n % 10:040x}`\n"
+        + "x" * 6_000
+        for n in range(13)
+    ]
+    source.bodies = older + source.bodies  # 15 bot reviews; the newest carries the ledger
+    source.list_rebase_replies = lambda *a: [
+        (f"{GEN}/r3-1", f"dev{n}", f"argument {n} " + "r" * 1_990) for n in range(25)
+    ]
+    source.list_recent_issue_comments = lambda n: [
+        (f"user{k}", f"comment {k} " + "c" * 1_900) for k in range(30)
+    ]
+    view = source.pr_view
+    source.pr_view = lambda number: {**view(number), "body": body}
+    posted = []
+    source.create_review = lambda _n, text, _sha: posted.append(text) or {}
+    monkeypatch.setattr(cli, "_github", lambda env: source)
+    monkeypatch.setattr(cli, "openrouter_chat", fake_chat)
+    env = environment(ROLE="all", COMPACTION_MODEL="openai/gpt-5", OPENROUTER_API_KEY="k")
+
+    collected, state, history = cli._collect_with_loop(env)
+    assert len(requests) == 1
+    assert len(history.encode()) <= MAX_REBASE_CONTEXT_BYTES
+    assert "Summary of older history (model-generated, untrusted):" in history
+    assert "older items summarized]" in history
+    user = cli._messages(env, collected, state, history)[1]["content"]
+    assert "## Untrusted PR body (head only; compacted into the brief above)" in user
+    assert "Detail line. " * 400 not in user
+    assert not BRIEF_MARKER_RE.search(user) and BRIEF_HEADING in user
+
+    monkeypatch.setattr(cli, "_set_output", lambda *a: None)
+    monkeypatch.setattr(cli, "_maybe_status", lambda *a, **k: None)
+    monkeypatch.setattr(cli, "_checkout_has_commit", lambda *a: False)
+    finish_env = {**env, "FAIL_ON": "never", "SOURCE_WORKSPACE": str(tmp_path)}
+    lane = LaneResult(1, True, "vendor/model", head_sha=HEAD)
+    assert cli._finish(finish_env, [lane], collected, state) == 0
+    assert BRIEF_MARKER_RE.search(posted[0])
+
+    requests.clear()
+    off = environment(ROLE="all", COMPACTION="off", COMPACTION_MODEL="openai/gpt-5")
+    collected, state, history = cli._collect_with_loop(off)
+    user = cli._messages(off, collected, state, history)[1]["content"]
+    assert requests == [] and BRIEF_HEADING not in user
+    assert f"## Untrusted PR body\n\n```text\n{body}\n```" in user

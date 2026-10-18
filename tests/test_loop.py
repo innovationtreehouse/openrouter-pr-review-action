@@ -11,12 +11,9 @@ from or_pr_review.loop import (
     LEDGER_V1_EVIDENCE_COMPAT_LIMIT,
     LEDGER_V1_TITLE_COMPAT_LIMIT,
     LEDGER_VERSION,
-    MAX_REPLIES_BYTES,
-    OMISSION_MARKER,
     Ledger,
     LedgerFinding,
     LoopState,
-    _clip_tail,
     apply_round,
     apply_severity_floor,
     decide_loop_state,
@@ -24,7 +21,6 @@ from or_pr_review.loop import (
     extract_ledger,
     latest_ledger,
     merge_resolutions,
-    render_agent_context,
     round_report,
 )
 from or_pr_review.merge import MergedIssue
@@ -445,62 +441,6 @@ def test_encode_ledger_overflow_fails_visibly() -> None:
             repo=REPO,
             pr_number=1,
         )
-
-
-def test_render_agent_context_clips_long_replies() -> None:
-    text = render_agent_context([("r1-1", "dev", "x" * 3000)], [("dev", "looks good")])
-    assert "Reply to finding r1-1 (from dev):" in text
-    assert "…[clipped]" in text
-    assert "PR comment (from dev):" in text
-
-
-def test_render_agent_context_overflow_keeps_newest() -> None:
-    replies = [
-        ("r1-1", "dev", "OLD reply " + "x" * 3000),
-        ("r1-2", "dev", "NEWEST critical reply"),
-    ]
-    comments = [("dev", f"comment {n} " + "y" * 1900) for n in range(20)]
-    text = render_agent_context(replies, comments)
-    # Finding replies get the budget first; issue-comment overflow drops the
-    # OLDEST entries, never the newest.
-    assert "NEWEST critical reply" in text
-    assert "comment 19 " in text
-    assert "comment 0 " not in text
-    assert OMISSION_MARKER.strip() in text
-    assert len(text.encode("utf-8")) <= MAX_REPLIES_BYTES
-
-
-def test_render_agent_context_respects_total_byte_cap_with_separator() -> None:
-    replies = [("r1-1", "dev", "reply " + "x" * 8_000)]
-    comments = [(f"user{n}", "comment " + "y" * 4_000) for n in range(6)]
-    text = render_agent_context(replies, comments)
-    assert len(text.encode("utf-8")) <= MAX_REPLIES_BYTES
-
-
-def test_render_agent_context_multibyte_near_cap() -> None:
-    emoji = "🔍"
-    replies = [
-        ("r1-1", "dev", "OLD " + emoji * 2_000),
-        ("r1-2", "dev", "NEWEST " + emoji * 500),
-    ]
-    comments = [("dev", "note " + emoji * 1_000)]
-    text = render_agent_context(replies, comments)
-    assert "NEWEST" in text
-    assert len(text.encode("utf-8")) <= MAX_REPLIES_BYTES
-
-
-def test_clip_tail_includes_marker_within_budget() -> None:
-    text = "a" * 500
-    clipped = _clip_tail(text, 100)
-    assert clipped.startswith(OMISSION_MARKER)
-    assert len(clipped.encode("utf-8")) <= 100
-
-
-def test_clip_tail_zero_budget_returns_empty() -> None:
-    assert _clip_tail("hello", 0) == ""
-    assert _clip_tail("old newest", 3) == "est"
-    tiny = _clip_tail("hello", len(OMISSION_MARKER.encode("utf-8")) - 1)
-    assert len(tiny.encode("utf-8")) <= len(OMISSION_MARKER.encode("utf-8")) - 1
 
 
 def test_ledger_generation_roundtrip() -> None:
