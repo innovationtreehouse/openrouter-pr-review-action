@@ -13,7 +13,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 
 from or_pr_review.github_ops import STATUS_MARKER
-from or_pr_review.loop import LedgerFinding
+from or_pr_review.loop import TRIMMED_TITLE, LedgerFinding
 
 MAX_REPLY_CHARS = 2_000
 NEWEST_REVIEW_BYTES = 32_000
@@ -278,13 +278,20 @@ def _match_finding(
         (
             f
             for f in findings
-            if severity
-            and f.severity == severity.group(1)
-            and f.title.strip("… ")
-            and title.startswith(f.title.strip("… "))
+            if severity and f.severity == severity.group(1) and _title_matches(title, f.title)
         ),
         None,
     )
+
+
+def _title_matches(title: str, ledger_title: str) -> bool:
+    """Exact match, or a prefix match only when the ledger title was cut to its length cap."""
+    core = ledger_title.strip("… ")
+    if not core:
+        return False
+    if title.strip() == core:
+        return True
+    return len(core) >= TRIMMED_TITLE and title.startswith(core)
 
 
 def _strip_footer(body: str) -> str:

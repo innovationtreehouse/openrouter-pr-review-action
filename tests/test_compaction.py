@@ -237,6 +237,21 @@ def test_reference_matches_updates_tag_and_requires_same_severity():
     assert "#### 🔵 Issue 2 — Naming X" in text  # severity nit != bug: no match
 
 
+def test_short_ledger_title_never_prefix_matches_a_different_finding():
+    body = review("a" * 40, tag="X")  # issue 1: [bug] "Null deref X"
+    text = compact(review_bodies=[body], ledger_findings=[ledger("r1-1", "Null deref")]).text
+    assert "see Prior findings" not in text and "body xxx" in text
+
+
+def test_trimmed_ledger_title_still_prefix_matches():
+    long_title = "Null deref " + "y" * 120
+    body = review("a" * 40, tag="X").replace("Null deref X", long_title)
+    text = compact(
+        review_bodies=[body], ledger_findings=[ledger("r1-1", long_title[:100] + "…")]
+    ).text
+    assert "- `r1-1` [bug]" in text and "body xxx" not in text
+
+
 def test_pr2305_shaped_review_shrinks_to_ledger_references():
     from or_pr_review.merge import MergedIssue, format_issue_block
 
