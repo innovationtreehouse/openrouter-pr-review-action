@@ -206,14 +206,18 @@ inputs:
   compaction:
     description: >-
       auto (default) | off. On re-reviews (verify mode or rebase scope), auto
-      compacts a long PR body into a model-generated brief when
-      compaction_model is set. Initial reviews are unchanged.
+      lets compaction_model write a cached brief of a long PR body and of
+      history that overflows the budget. off disables that brief; the
+      deterministic history compaction always applies. Initial reviews are
+      unchanged.
     required: false
     default: "auto"
   compaction_model:
     description: >-
       OpenRouter slug for the re-review brief. Empty (default) skips the
-      model brief; only deterministic behavior applies.
+      brief, so only deterministic compaction applies. Uses this slug's
+      model_routes entry when present. Any failure falls back to the full
+      body.
     required: false
     default: ""
   bot_login:
