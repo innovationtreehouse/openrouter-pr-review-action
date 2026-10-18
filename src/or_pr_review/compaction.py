@@ -16,7 +16,6 @@ from or_pr_review.github_ops import STATUS_MARKER
 
 MAX_REPLY_CHARS = 2_000
 NEWEST_REVIEW_BYTES = 32_000
-SUMMARY_MAX_BYTES = 4_000
 SETTLED_ARGUMENT_CHARS = 200
 DIGEST_FALLBACK_CHARS = 300
 DIGEST_MAX_CHARS = 600
@@ -54,6 +53,7 @@ class CompactedHistory:
     bytes_before: int
     bytes_after: int
     dropped: dict[str, int] = field(default_factory=dict)
+    summarized: bool = False
 
     def stats_line(self) -> str:
         dropped = ",".join(f"{k}:{v}" for k, v in self.dropped.items() if v) or "0"
@@ -116,7 +116,7 @@ def compact_history(
     kept, evicted = _allocate(sections, budget - fixed - _OMISSION_RESERVE)
     summary = ""
     if evicted and summary_for_evicted is not None:
-        reserve = min(SUMMARY_MAX_BYTES, budget // 4)
+        reserve = budget // 4
         retry_kept, retry_evicted = _allocate(
             sections, budget - fixed - _OMISSION_RESERVE - reserve
         )
@@ -125,8 +125,10 @@ def compact_history(
         except Exception:  # noqa: BLE001 - a summary must never fail the review
             print("warning: history summary failed; omitting it", file=sys.stderr)
             produced = None
-        if produced and produced.strip():
-            summary = _clip_head(f"{_SUMMARY_HEADING}\n{produced.strip()}", reserve - 2)
+        candidate = f"{_SUMMARY_HEADING}\n{produced.strip()}" if produced else ""
+        # All or nothing: a clipped summary would silently lose what the caller relies on.
+        if produced and produced.strip() and _size(candidate) + 2 <= reserve:
+            summary = candidate
             kept, evicted = retry_kept, retry_evicted
     for name, _ in evicted:
         dropped[name] = dropped.get(name, 0) + 1
@@ -142,7 +144,7 @@ def compact_history(
         verb = "summarized" if summary else "omitted"
         blocks.append(f"[{len(evicted)} older items {verb}]")
     text = "\n\n".join(blocks)
-    return CompactedHistory(text, before, _size(text), dropped)
+    return CompactedHistory(text, before, _size(text), dropped, summarized=bool(summary))
 
 
 def _allocate(

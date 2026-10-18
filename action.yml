@@ -203,6 +203,19 @@ inputs:
       lane/judge plumbing; pull_request runs default to the event head SHA.
     required: false
     default: ""
+  compaction:
+    description: >-
+      auto (default) | off. On re-reviews (verify mode or rebase scope), auto
+      compacts a long PR body into a model-generated brief when
+      compaction_model is set. Initial reviews are unchanged.
+    required: false
+    default: "auto"
+  compaction_model:
+    description: >-
+      OpenRouter slug for the re-review brief. Empty (default) skips the
+      model brief; only deterministic behavior applies.
+    required: false
+    default: ""
   bot_login:
     description: >-
       GitHub login this action posts reviews as. Review-loop ledger state is
@@ -346,6 +359,8 @@ runs:
         LANE_MODEL: ${{ inputs.lane_model }}
         LANE_RESULTS_DIR: ${{ inputs.lane_results_dir }}
         BOT_LOGIN: ${{ inputs.bot_login }}
+        COMPACTION: ${{ inputs.compaction }}
+        COMPACTION_MODEL: ${{ inputs.compaction_model }}
         PERSONA: ${{ inputs.persona }}
         WORK: ${{ steps.dirs.outputs.work }}
         ALL_LANE_RESULTS_DIR: ${{ steps.dirs.outputs.all_lane_results_dir }}

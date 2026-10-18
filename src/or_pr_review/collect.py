@@ -161,6 +161,10 @@ class CollectedReview:
     # Target-branch tip from collection, independent of an incremental diff's base.
     policy_base_sha: str = ""
     review_policy: ResolvedPolicy | None = None
+    # Re-review body compaction (brief.py): rendered brief block for the
+    # prompt and the hidden cache marker the publisher appends.
+    body_brief: str = ""
+    brief_marker: str = ""
 
     @property
     def diff(self) -> str:

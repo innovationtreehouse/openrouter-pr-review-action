@@ -132,14 +132,14 @@ def test_summary_hook_gets_evicted_items_within_budget():
 
     def summarize(items: list[str]) -> str:
         seen.append(items)
-        return "S" * 10_000
+        return "S" * 3_000
 
     comments = [(f"u{n}", f"comment{n} " + "c" * 1_900) for n in range(30)]
     result = compact(budget=MAX_REPLIES_BYTES, comments=comments, summary_for_evicted=summarize)
     assert len(seen) == 1 and any("comment0 " in item for item in seen[0])
     assert all(f"comment{n} " not in result.text for n in range(len(seen[0])))
     assert "Summary of older history (model-generated, untrusted):" in result.text
-    assert "older items summarized]" in result.text
+    assert "older items summarized]" in result.text and result.summarized
     assert len(result.text.encode()) <= MAX_REPLIES_BYTES
 
 
@@ -153,6 +153,15 @@ def test_summary_hook_none_or_error_falls_back_to_plain_omission():
     for hook in (lambda items: None, boom):
         result = compact(budget=MAX_REPLIES_BYTES, comments=comments, summary_for_evicted=hook)
         assert result.text == plain.text
+
+
+def test_oversized_summary_is_dropped_not_clipped():
+    comments = [(f"u{n}", f"comment{n} " + "c" * 1_900) for n in range(30)]
+    plain = compact(budget=MAX_REPLIES_BYTES, comments=comments)
+    result = compact(
+        budget=MAX_REPLIES_BYTES, comments=comments, summary_for_evicted=lambda items: "S" * 5_000
+    )
+    assert result.text == plain.text and not result.summarized
 
 
 def test_hook_not_called_without_eviction():
