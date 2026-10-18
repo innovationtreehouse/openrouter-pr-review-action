@@ -344,3 +344,21 @@ def test_recent_issue_comments_exclude_bot_review_bodies() -> None:
 
     gh = GitHub(token="t", repository="o/r", runner=runner)
     assert gh.list_recent_issue_comments(1) == [("dev", "I pushed a fix for r1-1")]
+
+
+def test_create_review_keeps_event_on_inline_fallback() -> None:
+    calls: list[dict] = []
+
+    def runner(cmd: list[str], *, env: dict, timeout: int, stdin: str | None = None) -> str:
+        calls.append(json.loads(stdin or "{}"))
+        if len(calls) == 1:
+            raise ActionError("422 line is not part of the diff")
+        return json.dumps({"html_url": "https://example.test/review"})
+
+    gh = GitHub(token="t", repository="o/r", runner=runner)
+    gh.create_review(
+        1, "body", "c" * 40,
+        comments=[{"path": "a.py", "line": 1, "side": "RIGHT", "body": "x"}],
+        event="APPROVE",
+    )
+    assert [c["event"] for c in calls] == ["APPROVE", "APPROVE"]

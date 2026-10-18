@@ -1453,6 +1453,33 @@ def _collect_with_loop(
     return _apply_brief(session, collected, summarized), state, agent_replies
 
 
+def _review_event(env: dict[str, str], verdict: str, open_issues: int) -> str:
+    """APPROVE only when opted in and the review is clean; never REQUEST_CHANGES."""
+    mode = (env.get("APPROVE") or "off").strip().lower()
+    if mode not in {"off", "clean"}:
+        raise ActionError("approve must be 'off' or 'clean'")
+    return "APPROVE" if mode == "clean" and verdict == "clean" and not open_issues else "COMMENT"
+
+
+def _post_review(
+    github: GitHub,
+    number: int,
+    body: str,
+    sha: str,
+    comments: list[dict[str, Any]],
+    event: str,
+) -> dict[str, Any]:
+    extra: dict[str, Any] = {"comments": comments} if comments else {}
+    if event == "COMMENT":
+        return github.create_review(number, body, sha, **extra)
+    try:
+        return github.create_review(number, body, sha, event=event, **extra)
+    except ActionError as exc:
+        # Repos that forbid Actions approvals still get the review, as a comment.
+        print(f"warning: approval was rejected; posting as a comment: {redact(str(exc))}")
+        return github.create_review(number, body, sha, **extra)
+
+
 def _brief_session(
     env: dict[str, str], github: GitHub, collected: CollectedReview, state: LoopState
 ) -> BriefSession | None:
@@ -1909,13 +1936,11 @@ def _finish(
             generation=generation,
         )
     review_url = ""
+    event = _review_event(env, verdict, outcome.open_issue_count)
     try:
-        if comments:
-            posted = github.create_review(
-                collected.pr_number, bodies[0], reviewed_sha, comments=comments
-            )
-        else:
-            posted = github.create_review(collected.pr_number, bodies[0], reviewed_sha)
+        posted = _post_review(
+            github, collected.pr_number, bodies[0], reviewed_sha, comments, event
+        )
         html = posted.get("html_url")
         review_url = html if isinstance(html, str) else ""
     except ActionError as exc:

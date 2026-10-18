@@ -203,6 +203,15 @@ inputs:
       lane/judge plumbing; pull_request runs default to the event head SHA.
     required: false
     default: ""
+  approve:
+    description: >-
+      off (default) | clean. clean submits the review as an APPROVE when the
+      verdict is clean with no open findings; every other review stays a
+      COMMENT. The action never requests changes. Needs the repository
+      setting that allows GitHub Actions to approve pull requests; if GitHub
+      refuses, the review posts as a COMMENT with a warning.
+    required: false
+    default: "off"
   compaction:
     description: >-
       auto (default) | off. On re-reviews (verify mode or rebase scope), auto
@@ -363,6 +372,7 @@ runs:
         LANE_MODEL: ${{ inputs.lane_model }}
         LANE_RESULTS_DIR: ${{ inputs.lane_results_dir }}
         BOT_LOGIN: ${{ inputs.bot_login }}
+        APPROVE: ${{ inputs.approve }}
         COMPACTION: ${{ inputs.compaction }}
         COMPACTION_MODEL: ${{ inputs.compaction_model }}
         PERSONA: ${{ inputs.persona }}
