@@ -858,6 +858,7 @@ def _run_loop(
                         meta["provider"] = exc.provider
                 if progress is not None:
                     progress()
+                print(f"lane request rejected: {_request_shape(payload)}", file=sys.stderr)
                 if state.signature_finalizing:
                     # An unsigned tool turn gets one safe, tool-free finish.
                     # Retrying it with another transcript mutation would no
@@ -1059,6 +1060,18 @@ def _run_loop(
     finally:
         if stats is not None:
             stats["tool_rounds"] = state.turns
+
+
+def _request_shape(payload: dict[str, Any]) -> str:
+    """Describe a request's protocol fields without any message content."""
+    messages = payload.get("messages") or []
+    roles = ",".join(str(m.get("role", "?"))[0] for m in messages if isinstance(m, dict))
+    return (
+        f"response_format={'response_format' in payload} tools={len(payload.get('tools') or [])} "
+        f"tool_choice={payload.get('tool_choice')} "
+        f"parallel_tool_calls={payload.get('parallel_tool_calls')} "
+        f"messages={len(messages)} roles={roles}"
+    )
 
 
 def _looks_like_context_overflow(lowered_error: str) -> bool:
