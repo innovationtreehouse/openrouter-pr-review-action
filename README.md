@@ -580,6 +580,7 @@ for your account and action revision.
 | `lane_model` | _empty_ | Optional validated model override for `role=lane`. Normally supplied through matrix plumbing. |
 | `lane_results_dir` | _empty_ | Lane artifact output/input directory used by `role=lane` and `role=judge`. Normally supplied by orchestration. |
 | `head_sha` | _empty_ | Full reviewed commit SHA resolved by reusable-workflow setup. Internal lane/judge plumbing; pull-request runs use the event head by default. |
+| `approve` | `off` | `off` or `clean`. `clean` submits a clean review (no open findings) as an APPROVE; anything else stays a COMMENT. The action never requests changes. Needs "Allow GitHub Actions to create and approve pull requests"; if GitHub refuses, the review posts as a COMMENT. |
 | `compaction` | `auto` | `auto` or `off`. `off` disables the model brief on re-reviews; deterministic compaction still applies. See "Re-review context compaction". |
 | `compaction_model` | _empty_ | OpenRouter slug that writes the re-review brief and summarizes evicted history. Empty skips the brief. Uses its `model_routes` entry if present. |
 | `bot_login` | `github-actions[bot]` | Identity the action posts reviews as. Review-loop ledger state is only trusted from this login. Change it when `github_token` is a PAT or App token. |

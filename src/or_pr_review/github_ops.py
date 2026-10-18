@@ -291,8 +291,9 @@ class GitHub:
         body: str,
         commit_id: str,
         comments: list[dict[str, Any]] | None = None,
+        event: str = "COMMENT",
     ) -> dict[str, Any]:
-        payload: dict[str, Any] = {"event": "COMMENT", "body": body, "commit_id": commit_id}
+        payload: dict[str, Any] = {"event": event, "body": body, "commit_id": commit_id}
         if comments:
             payload["comments"] = comments
         try:
@@ -313,7 +314,7 @@ class GitHub:
                 f"warning: inline comments were rejected and dropped "
                 f"({len(comments)} comment(s)): {redact(str(exc))}"
             )
-            fallback = {"event": "COMMENT", "body": body, "commit_id": commit_id}
+            fallback = {"event": event, "body": body, "commit_id": commit_id}
             raw = self._gh(
                 "api",
                 f"repos/{self.repository}/pulls/{number}/reviews",
