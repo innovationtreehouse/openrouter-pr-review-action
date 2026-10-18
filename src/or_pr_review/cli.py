@@ -26,6 +26,7 @@ from or_pr_review.collect import (
     parse_scope,
     resolve_mode,
 )
+from or_pr_review.compaction import compact_history
 from or_pr_review.errors import ActionError, SchemaError
 from or_pr_review.github_ops import GitHub, require_full_sha, upsert_status_comment
 from or_pr_review.harness import (
@@ -42,6 +43,8 @@ from or_pr_review.judge import (
     run_llm_judge,
 )
 from or_pr_review.loop import (
+    MAX_REBASE_CONTEXT_BYTES,
+    MAX_REPLIES_BYTES,
     Ledger,
     LoopState,
     apply_round,
@@ -50,8 +53,6 @@ from or_pr_review.loop import (
     encode_ledger,
     latest_ledger,
     merge_resolutions,
-    render_agent_context,
-    render_rebase_context,
     round_report,
 )
 from or_pr_review.merge import MergedIssue, issues_from_single_lane
@@ -1399,26 +1400,34 @@ def _collect_with_loop(
             raise ActionError("review history changed while acquiring rebase context; retry")
         # History is part of this review's contract. A failed history read must
         # not silently downgrade a rebase into a review without its rebuttals.
-        agent_replies = render_rebase_context(
-            bodies,
-            github.list_rebase_replies(pr_number, _bot_login(env)),
-            github.list_recent_issue_comments(pr_number),
+        history = compact_history(
+            budget=MAX_REBASE_CONTEXT_BYTES,
+            bot_login=_bot_login(env),
+            review_bodies=bodies,
+            replies=github.list_rebase_replies(pr_number, _bot_login(env)),
+            comments=github.list_recent_issue_comments(pr_number),
+            carried_ids={f"{state.generation}/{finding.id}" for finding in state.prior_findings},
         )
-        return collected, state, agent_replies
+        print(history.stats_line(), file=sys.stderr)
+        return collected, state, history.text
     if with_replies and state.mode == "verify":
         try:
             # Replies to findings the severity floor retired would reintroduce
             # the retired context and invite re-adjudication; only threads for
             # carried findings (open or disputed) reach the prompt.
             carried_ids = {finding.id for finding in state.prior_findings}
-            agent_replies = render_agent_context(
-                [
+            history = compact_history(
+                budget=MAX_REPLIES_BYTES,
+                bot_login=_bot_login(env),
+                replies=[
                     reply
                     for reply in github.list_finding_replies(pr_number, generation=state.generation)
                     if reply[0] in carried_ids
                 ],
-                github.list_recent_issue_comments(pr_number),
+                comments=github.list_recent_issue_comments(pr_number),
             )
+            print(history.stats_line(), file=sys.stderr)
+            agent_replies = history.text
         except ActionError as exc:
             print(
                 "warning: could not fetch reviewer replies; verifying from "

@@ -449,8 +449,11 @@ is reported as a new finding with evidence connecting it to the earlier fix.
 
 Rebase context includes historical bot review bodies and replies to their
 finding threads, including earlier generations, plus recent PR comments.
-History is untrusted evidence, never instructions. The narrative is bounded
-to 64,000 UTF-8 bytes, favoring recent material and visibly marking omissions;
+History is untrusted evidence, never instructions. It is compacted
+deterministically: duplicate reviews of one commit collapse to the newest,
+older reviews become one-line digests, and replies keep the newest per finding
+and author. The narrative is bounded to 64,000 UTF-8 bytes; overflow evicts
+the lowest-priority material and visibly counts omissions rather than failing;
 the current ledger remains separate. A history fetch failure or a detected
 head, base, or ledger change during collection fails the review for retry.
 Prepared matrix runs freeze this context so every lane sees the same snapshot.

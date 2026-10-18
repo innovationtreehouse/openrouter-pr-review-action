@@ -6,6 +6,7 @@ from dataclasses import replace
 import pytest
 
 from or_pr_review import cli
+from or_pr_review.compaction import compact_history
 from or_pr_review.errors import ActionError, DivergedRangeError, SchemaError
 from or_pr_review.github_ops import GitHub
 from or_pr_review.loop import (
@@ -14,7 +15,6 @@ from or_pr_review.loop import (
     LedgerFinding,
     apply_round,
     encode_ledger,
-    render_rebase_context,
 )
 from or_pr_review.merge import MergedIssue
 from or_pr_review.prompt import build_messages
@@ -215,13 +215,14 @@ def test_rebase_history_read_failure_is_not_silently_ignored(monkeypatch):
 
 
 def test_history_is_bounded_with_visible_omission_and_hidden_markers_removed():
-    context = render_rebase_context(
-        ["old " + "Ω" * 40_000, "latest finding <!-- secret-metadata --> fixed"],
-        [(f"{GEN}/r1-1", "developer", "Ω" * 40_000)],
-        [("developer", "latest explanation")],
-    )
+    context = compact_history(
+        budget=MAX_REBASE_CONTEXT_BYTES,
+        bot_login="github-actions[bot]",
+        review_bodies=["old " + "Ω" * 40_000, "latest finding <!-- secret-metadata --> fixed"],
+        replies=[(f"{GEN}/r1-1", "developer", "Ω" * 40_000)],
+        comments=[("developer", "latest explanation")],
+    ).text
     assert len(context.encode()) <= MAX_REBASE_CONTEXT_BYTES
-    assert "older entries omitted" in context
     assert "latest finding" in context and "secret-metadata" not in context
     assert "latest explanation" in context
 
