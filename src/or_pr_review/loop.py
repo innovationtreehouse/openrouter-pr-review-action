@@ -53,6 +53,8 @@ LEDGER_V1_EVIDENCE_COMPAT_LIMIT = 616
 MAX_LEDGER_MODELS = 8
 MAX_REPLIES_BYTES = 16_000
 MAX_REBASE_CONTEXT_BYTES = 64_000
+# compaction: full sends history verbatim up to this; larger history is compacted.
+MAX_FULL_HISTORY_BYTES = 256_000
 
 _FINDING_ID_RE = re.compile(r"^r\d{1,3}-\d{1,3}$")
 _GENERATION_RE = re.compile(r"^[0-9a-f]{0,12}$")

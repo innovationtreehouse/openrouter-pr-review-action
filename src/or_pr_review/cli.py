@@ -27,7 +27,7 @@ from or_pr_review.collect import (
     parse_scope,
     resolve_mode,
 )
-from or_pr_review.compaction import compact_history
+from or_pr_review.compaction import CompactedHistory, compact_history, full_history
 from or_pr_review.errors import ActionError, SchemaError
 from or_pr_review.github_ops import GitHub, require_full_sha, upsert_status_comment
 from or_pr_review.harness import (
@@ -45,6 +45,7 @@ from or_pr_review.judge import (
     run_llm_judge,
 )
 from or_pr_review.loop import (
+    MAX_FULL_HISTORY_BYTES,
     MAX_REBASE_CONTEXT_BYTES,
     MAX_REPLIES_BYTES,
     Ledger,
@@ -1414,7 +1415,8 @@ def _collect_with_loop(
             raise ActionError("review history changed while acquiring rebase context; retry")
         # History is part of this review's contract. A failed history read must
         # not silently downgrade a rebase into a review without its rebuttals.
-        history = compact_history(
+        history = _history(
+            env,
             budget=MAX_REBASE_CONTEXT_BYTES,
             bot_login=_bot_login(env),
             review_bodies=bodies,
@@ -1424,15 +1426,16 @@ def _collect_with_loop(
             ledger_findings=state.prior_findings,
             summary_for_evicted=session.summarize_evicted if session else None,
         )
-        print(history.stats_line(), file=sys.stderr)
         return _apply_brief(session, collected, history.summarized), state, history.text
     if with_replies and state.mode == "verify":
+        _compaction_mode(env)  # a bad value must fail, not read as a failed history fetch
         try:
             # Replies to findings the severity floor retired would reintroduce
             # the retired context and invite re-adjudication; only threads for
             # carried findings (open or disputed) reach the prompt.
             carried_ids = {finding.id for finding in state.prior_findings}
-            history = compact_history(
+            history = _history(
+                env,
                 budget=MAX_REPLIES_BYTES,
                 bot_login=_bot_login(env),
                 replies=[
@@ -1443,7 +1446,6 @@ def _collect_with_loop(
                 comments=github.list_recent_issue_comments(pr_number),
                 summary_for_evicted=session.summarize_evicted if session else None,
             )
-            print(history.stats_line(), file=sys.stderr)
             agent_replies, summarized = history.text, history.summarized
         except ActionError as exc:
             print(
@@ -1451,6 +1453,35 @@ def _collect_with_loop(
                 f"commits only: {redact(str(exc))}"
             )
     return _apply_brief(session, collected, summarized), state, agent_replies
+
+
+def _compaction_mode(env: dict[str, str]) -> str:
+    mode = (env.get("COMPACTION") or "auto").strip().lower()
+    if mode not in {"auto", "off", "full"}:
+        raise ActionError("compaction must be 'auto', 'off' or 'full'")
+    return mode
+
+
+def _history(env: dict[str, str], **kwargs: Any) -> CompactedHistory:
+    """compaction: full keeps history verbatim up to MAX_FULL_HISTORY_BYTES, else compacts."""
+    if _compaction_mode(env) == "full":
+        full = full_history(
+            bot_login=kwargs["bot_login"],
+            review_bodies=kwargs.get("review_bodies"),
+            replies=kwargs["replies"],
+            comments=kwargs["comments"],
+        )
+        if full.bytes_after <= MAX_FULL_HISTORY_BYTES:
+            print(f"history compaction: full verbatim bytes={full.bytes_after}", file=sys.stderr)
+            return full
+        print(
+            f"history compaction: full history {full.bytes_after} bytes exceeds the "
+            f"{MAX_FULL_HISTORY_BYTES} cap; falling back to compaction",
+            file=sys.stderr,
+        )
+    history = compact_history(**kwargs)
+    print(history.stats_line(), file=sys.stderr)
+    return history
 
 
 def _review_event(env: dict[str, str], verdict: str, open_issues: int) -> str:
@@ -1486,9 +1517,9 @@ def _brief_session(
     """Re-reviews only; an empty compaction_model keeps the deterministic path."""
     if state.mode != "verify":
         return None
-    compaction = (env.get("COMPACTION") or "auto").strip().lower()
-    if compaction not in {"auto", "off"}:
-        raise ActionError("compaction must be 'auto' or 'off'")
+    compaction = _compaction_mode(env)
+    if compaction == "full":
+        return None
     raw_model = (env.get("COMPACTION_MODEL") or "").strip()
     model = parse_slug(raw_model, what="compaction_model") if raw_model else ""
     if compaction == "off":

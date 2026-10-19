@@ -507,7 +507,14 @@ review brief: <skipped|reused|built|failed|failed-cached> (source_bytes=<n>, bri
 summary also logs `warning: history summary failed; omitting it`.
 
 To stop the model brief, set `compaction: off` or leave `compaction_model`
-empty. The deterministic compaction and its budgets always apply.
+empty; the deterministic compaction and its budgets still apply.
+
+`compaction: full` skips both the brief and the deterministic compaction. Every
+earlier bot review, reply and PR comment goes to the prompt verbatim (hidden
+markers, status comments and the bot's own comments still removed) up to
+256,000 bytes. Larger history falls back to deterministic compaction and logs
+`history compaction: full history <bytes> bytes exceeds the 256000 cap; falling back to compaction`;
+otherwise it logs `history compaction: full verbatim bytes=<n>`.
 
 Follow-up reviewers put incomplete fixes in the existing finding's resolution.
 Additional evidence can name `prior_finding_id` to retain that open finding's ID;
@@ -581,7 +588,7 @@ for your account and action revision.
 | `lane_results_dir` | _empty_ | Lane artifact output/input directory used by `role=lane` and `role=judge`. Normally supplied by orchestration. |
 | `head_sha` | _empty_ | Full reviewed commit SHA resolved by reusable-workflow setup. Internal lane/judge plumbing; pull-request runs use the event head by default. |
 | `approve` | `off` | `off` or `clean`. `clean` submits a clean review (no open findings) as an APPROVE; anything else stays a COMMENT. The action never requests changes. Needs "Allow GitHub Actions to create and approve pull requests"; if GitHub refuses, the review posts as a COMMENT. |
-| `compaction` | `auto` | `auto` or `off`. `off` disables the model brief on re-reviews; deterministic compaction still applies. See "Re-review context compaction". |
+| `compaction` | `auto` | `auto`, `off` or `full`. `off` disables the model brief on re-reviews; deterministic compaction still applies. `full` sends re-review history verbatim up to 256,000 bytes, compacting only above that. See "Re-review context compaction". |
 | `compaction_model` | _empty_ | OpenRouter slug that writes the re-review brief and summarizes evicted history. Empty skips the brief. Uses its `model_routes` entry if present. |
 | `bot_login` | `github-actions[bot]` | Identity the action posts reviews as. Review-loop ledger state is only trusted from this login. Change it when `github_token` is a PAT or App token. |
 | `persona` | _empty_ | **Reserved, unused in v1.** Future single-persona runs should skip the judge. |
