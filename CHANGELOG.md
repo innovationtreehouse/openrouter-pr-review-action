@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Cap every model's `max_tokens` at 32,768, not only Gemini. OpenRouter holds
+  credit for `max_tokens` while a request is in flight, so an uncapped Opus lane
+  reserved 65,536 tokens and ran a low balance dry.
+
+- Do not send a salvage request after HTTP 402 (out of credit); it would be
+  refused the same way. `OpenRouterHTTPError` now carries `status`.
+
 - Add re-review context compaction. Verify rounds and rebase reviews dedupe and
   digest earlier bot reviews, group replies, clean comments, and fit history to
   a priority budget (16 KB verify, 64 KB rebase), counting omissions instead of

@@ -11,6 +11,7 @@ import pytest
 
 from or_pr_review.errors import ActionError, LaneError
 from or_pr_review.harness import (
+    OpenRouterHTTPError,
     BLAST_RADIUS_NUDGE,
     BUDGET_EXHAUSTED_NOTICE,
     DEADLINE_FINALIZE_NOTICE,
@@ -26,7 +27,7 @@ from or_pr_review.harness import (
     require_openrouter_key,
     run_lane,
 )
-from or_pr_review.models import GEMINI_MAX_RESPONSE_TOKENS
+from or_pr_review.models import GEMINI_MAX_RESPONSE_TOKENS, MAX_RESPONSE_TOKENS
 
 
 def test_require_key_fail_closed() -> None:
@@ -102,7 +103,7 @@ def test_run_lane_captures_provider_and_pins_routing(tmp_path: Path) -> None:
     )
     assert result.ok
     assert result.provider == "Baseten"
-    assert "max_tokens" not in payloads[0]
+    assert payloads[0]["max_tokens"] == MAX_RESPONSE_TOKENS
     assert payloads[0]["provider"] == {"order": ["baseten"], "allow_fallbacks": False}
     # Round-trips through the lane artifact.
     from or_pr_review.schema import parse_lane_artifact
@@ -1897,6 +1898,28 @@ def test_lane_salvages_after_midloop_failure(tmp_path: Path) -> None:
     assert result.salvaged is True
     assert result.requests == 3
     assert result.tool_rounds == 1
+
+
+def test_lane_does_not_salvage_after_out_of_credit(tmp_path: Path) -> None:
+    (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
+    payloads: list[dict] = []
+
+    def chat(payload: dict) -> dict:
+        payloads.append(payload)
+        if len(payloads) == 1:
+            return _tool_reply()
+        raise OpenRouterHTTPError("OpenRouter HTTP 402: more credits", provider=None, status=402)
+
+    result = run_lane(
+        model="x-ai/grok-4.6",
+        messages=[{"role": "user", "content": "review"}],
+        api_key="sk-test",
+        workspace=tmp_path,
+        chat=chat,
+    )
+    assert not result.ok
+    assert result.salvaged is not True
+    assert len(payloads) == 2
 
 
 def test_lane_wall_clock_forces_structured_finish_before_job_timeout(

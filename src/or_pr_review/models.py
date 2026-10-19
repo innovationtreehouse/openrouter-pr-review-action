@@ -14,9 +14,11 @@ DEFAULT_MODEL = "x-ai/grok-4.6"
 # Verified live on OpenRouter 2026-08-29. Merge/de-dupe only; not a second reviewer.
 DEFAULT_JUDGE_MODEL = "openai/gpt-5.6-luna"
 
-# Gemini reserves against a large provider maximum unless the client supplies
-# an explicit cap. Other model families keep their native output maximum.
-GEMINI_MAX_RESPONSE_TOKENS = 32_768
+# OpenRouter holds credit for max_tokens while a request is in flight, so an
+# uncapped model reserves its full native maximum (65536 for Opus) and runs a
+# low balance dry. Every model family gets this cap.
+MAX_RESPONSE_TOKENS = 32_768
+GEMINI_MAX_RESPONSE_TOKENS = MAX_RESPONSE_TOKENS
 
 # OpenRouter slugs look like provider/model or provider/model:variant.
 # Do not invent slugs; callers pass catalogue ids.
@@ -68,7 +70,7 @@ def model_protocol_profile(model: str) -> ModelProtocolProfile:
     """Resolve stable request/transcript behavior without a live API lookup."""
 
     if not model.startswith("google/gemini-"):
-        return ModelProtocolProfile()
+        return ModelProtocolProfile(max_response_tokens=MAX_RESPONSE_TOKENS)
     return ModelProtocolProfile(
         max_response_tokens=GEMINI_MAX_RESPONSE_TOKENS,
         preserve_provider_metadata=True,
