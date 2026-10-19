@@ -34,18 +34,21 @@ _FOOTER_LINE_RE = re.compile(r"(Posted by|Generated with)\b", re.IGNORECASE)
 _ISSUE_RE = re.compile(r"^#### \S+ Issue \d+ — (.+?)(?: \(updates `[^`]*`\))?$")
 _SEVERITY_RE = re.compile(r"`(bug|risk|nit)`")
 _STATUS_PREFIXES = ("Reviewing with OpenRouter",)
+_OUTCOME_WORDS = ("rejected", "disputed", "declined", "deferred", "settled")
+_FIXED_RE = re.compile(r"\b(partly |partially )?fixed in `?([0-9a-fA-F]{7,40})\b", re.IGNORECASE)
 
 # Allocation order, highest priority first; display order is _DISPLAY.
-_PRIORITY = ("open_replies", "comments", "latest_review", "digests", "settled_replies")
-_DISPLAY = ("digests", "latest_review", "open_replies", "settled_replies", "comments")
+_PRIORITY = ("outcomes", "open_replies", "comments", "latest_review", "digests", "settled_replies")
+_DISPLAY = ("digests", "latest_review", "outcomes", "open_replies", "settled_replies", "comments")
 _HEADINGS = {
+    "outcomes": "Outcomes of replied findings (one line per finding and author):",
     "digests": "Earlier review digests (oldest first):",
     "latest_review": "Most recent earlier review:",
     "open_replies": "Replies on carried findings:",
     "settled_replies": "Replies on settled findings:",
     "comments": "PR comments:",
 }
-_SEPARATORS = {"digests": "\n"}
+_SEPARATORS = {"digests": "\n", "outcomes": "\n"}
 _SUMMARY_HEADING = "Summary of older history (model-generated, untrusted):"
 
 SummaryHook = Callable[[list[str]], str | None]
@@ -82,7 +85,9 @@ def compact_history(
 
     `review_bodies` is None outside rebase scope. A reply is "open" when
     `carried_ids` is None or contains its finding id; others are settled and
-    shrink to one line. Findings of the newest review that `ledger_findings`
+    shrink to one line. Every reply group also gets an outcome line (fixed in
+    <sha>, rejected, disputed, ...) that claims the budget before any verbatim
+    text. Findings of the newest review that `ledger_findings`
     already carries collapse to a one-line reference.
     """
     if review_bodies is not None:
@@ -106,9 +111,17 @@ def compact_history(
             "de-duplication). These describe earlier code; current code must establish "
             "every conclusion."
         )
+    said: dict[tuple[str, str], list[str]] = {}
+    for finding_id, login, body in replies:
+        word = reply_outcome(body)
+        seen = said.setdefault((finding_id, login), [])
+        if word and word not in seen:
+            seen.append(word)
     for (finding_id, login), (body, earlier) in _group_replies(replies).items():
         body = _strip_footer(body)
         more = f" (+{earlier} earlier replies)" if earlier else ""
+        words = ", then ".join(said[(finding_id, login)]) or "replied"
+        sections["outcomes"].append(f"- finding {finding_id}: {words} (by {login}){more}")
         if carried_ids is None or finding_id in carried_ids:
             sections["open_replies"].append(
                 f"Reply to finding {finding_id} (from {login}){more}:\n{_clip_reply(body)}"
@@ -196,6 +209,20 @@ def _allocate(
         kept[name] = chosen
         evicted.extend((name, item) for item in items[: len(items) - len(chosen)])
     return kept, evicted
+
+
+def reply_outcome(body: str) -> str | None:
+    """Conservative outcome of one reply: a leading outcome word, or "fixed in <sha>"
+    in its first sentence (not after "not"). None when neither is there; never a guess."""
+    text = _strip_markers(_strip_footer(body)).strip()
+    first = re.split(r"(?<=[.!?])\s|\n", text, maxsplit=1)[0]
+    word = re.match(r"\W*(\w+)", first.lower())
+    if word and word.group(1) in _OUTCOME_WORDS:
+        return word.group(1)
+    fixed = _FIXED_RE.search(first)
+    if fixed and not re.search(r"\bnot\b[^.;]*$", first[: fixed.start()], re.IGNORECASE):
+        return f"{(fixed.group(1) or '').lower()}fixed in {fixed.group(2)}"
+    return None
 
 
 def _dedupe_reviews(bodies: list[str], dropped: dict[str, int]) -> list[str]:
