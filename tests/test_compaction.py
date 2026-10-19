@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from or_pr_review.compaction import compact_history
+from or_pr_review.compaction import compact_history, reply_outcome
 from or_pr_review.github_ops import STATUS_MARKER
 from or_pr_review.loop import MAX_REBASE_CONTEXT_BYTES, MAX_REPLIES_BYTES
 from or_pr_review.merge import MergedIssue, format_issue_block
@@ -267,3 +267,36 @@ def test_pr2305_shaped_review_shrinks_to_ledger_references():
     assert len(body.encode()) > 16_000
     assert result.bytes_after < 2_000
     assert result.text.count("see Prior findings") == 9
+
+
+def test_reply_outcome_is_conservative():
+    assert reply_outcome("Fixed in 4fb685939. The summary now says") == "fixed in 4fb685939"
+    assert reply_outcome("Same finding as above; fixed in `4fb6859`.") == "fixed in 4fb6859"
+    assert reply_outcome("Partly fixed in b66415363: the rule") == "partly fixed in b66415363"
+    assert reply_outcome("Not fixed in abc1234 yet") is None
+    assert reply_outcome("Disputed. Lines 47 and 50 already do this." + FOOTER) == "disputed"
+    assert reply_outcome("Settled; not changing.") == "settled"
+    assert reply_outcome("**Deferred** to #2400.") == "deferred"
+    assert reply_outcome("Rejected: out of scope") == "rejected"
+    assert reply_outcome("Declined, by design.") == "declined"
+    assert reply_outcome("Verified against the policy library.") is None
+    assert reply_outcome("I think we fixed this somewhere") is None
+
+
+def test_outcome_lines_survive_when_verbatim_text_is_evicted():
+    late = "Long explanation. " + "q" * 400 + " Fixed in c6e3169."  # sha past the settled clip
+    replies = [(f"old/r1-{n}", "dev", "Disputed. " + "s" * 1_900) for n in range(30)]
+    replies += [("old/r9-9", "dev", late), ("g/r1-1", "dev", "Fixed in abc1234."),
+                ("g/r1-1", "dev", "Thanks!"), ("g/r1-2", "owner", "Deferred to #12. " + "d" * 1_900)]
+    comments = [(f"u{n}", f"comment{n} " + "c" * 1_900) for n in range(30)]
+    result = compact(budget=8_000, replies=replies, comments=comments, carried_ids={"g/r1-2"})
+    text = result.text
+    assert len(text.encode()) <= 8_000
+    assert all(f"- finding old/r1-{n}: disputed (by dev)" in text for n in range(30))
+    assert "- finding g/r1-1: fixed in abc1234 (by dev) (+1 earlier replies)" in text
+    assert "- finding g/r1-2: deferred (by owner)" in text
+    assert "- finding old/r9-9: replied (by dev)" in text  # first sentence names no outcome
+    # Verbatim text went first: settled arguments and older comments, never an outcome line.
+    assert result.dropped["settled_replies"] and result.dropped["comments"]
+    assert "outcomes" not in result.dropped
+    assert text.index("Outcomes of replied findings") < text.index("Replies on carried findings:")
