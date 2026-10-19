@@ -8,6 +8,11 @@
   compaction with no brief. `off` still works as a deprecated alias for
   `rules`. An invalid value now also fails verify rounds.
 
+- History compaction keeps one outcome line per replied finding and author
+  (`fixed in <sha>`, `rejected`, `disputed`, `declined`, `deferred`, `settled`,
+  else `replied`) and fits those lines before any verbatim text, so a fixed or
+  settled finding is not re-raised after its reply is evicted.
+
 - Cap every model's `max_tokens` at 32,768, not only Gemini. OpenRouter holds
   credit for `max_tokens` while a request is in flight, so an uncapped Opus lane
   reserved 65,536 tokens and ran a low balance dry.
