@@ -45,7 +45,7 @@ from or_pr_review.judge import (
     run_llm_judge,
 )
 from or_pr_review.loop import (
-    MAX_FULL_HISTORY_BYTES,
+    MAX_UNCOMPACTED_HISTORY_BYTES,
     MAX_REBASE_CONTEXT_BYTES,
     MAX_REPLIES_BYTES,
     Ledger,
@@ -1457,26 +1457,26 @@ def _collect_with_loop(
 
 def _compaction_mode(env: dict[str, str]) -> str:
     mode = (env.get("COMPACTION") or "auto").strip().lower()
-    if mode not in {"auto", "off", "full"}:
+    if mode not in {"auto", "off", "none"}:
         raise ActionError("compaction must be 'auto', 'off' or 'full'")
     return mode
 
 
 def _history(env: dict[str, str], **kwargs: Any) -> CompactedHistory:
-    """compaction: full keeps history verbatim up to MAX_FULL_HISTORY_BYTES, else compacts."""
-    if _compaction_mode(env) == "full":
+    """compaction: none keeps history verbatim up to MAX_UNCOMPACTED_HISTORY_BYTES, else compacts."""
+    if _compaction_mode(env) == "none":
         full = full_history(
             bot_login=kwargs["bot_login"],
             review_bodies=kwargs.get("review_bodies"),
             replies=kwargs["replies"],
             comments=kwargs["comments"],
         )
-        if full.bytes_after <= MAX_FULL_HISTORY_BYTES:
-            print(f"history compaction: full verbatim bytes={full.bytes_after}", file=sys.stderr)
+        if full.bytes_after <= MAX_UNCOMPACTED_HISTORY_BYTES:
+            print(f"history compaction: none, verbatim bytes={full.bytes_after}", file=sys.stderr)
             return full
         print(
-            f"history compaction: full history {full.bytes_after} bytes exceeds the "
-            f"{MAX_FULL_HISTORY_BYTES} cap; falling back to compaction",
+            f"history compaction: none, history {full.bytes_after} bytes exceeds the "
+            f"{MAX_UNCOMPACTED_HISTORY_BYTES} cap; falling back to compaction",
             file=sys.stderr,
         )
     history = compact_history(**kwargs)
@@ -1518,7 +1518,7 @@ def _brief_session(
     if state.mode != "verify":
         return None
     compaction = _compaction_mode(env)
-    if compaction == "full":
+    if compaction == "none":
         return None
     raw_model = (env.get("COMPACTION_MODEL") or "").strip()
     model = parse_slug(raw_model, what="compaction_model") if raw_model else ""

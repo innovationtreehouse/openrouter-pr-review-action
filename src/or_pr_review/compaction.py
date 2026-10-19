@@ -172,7 +172,7 @@ def full_history(
     replies: list[tuple[str, str, str]],
     comments: list[tuple[str, str]],
 ) -> CompactedHistory:
-    """`compaction: full`: every review, reply and comment verbatim (markers and status noise
+    """`compaction: none`: every review, reply and comment verbatim (markers and status noise
     removed, nothing deduped, digested or clipped). The caller enforces the size cap."""
     scrub = scrub_surrogates
     blocks: list[str] = []

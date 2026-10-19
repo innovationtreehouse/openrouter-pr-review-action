@@ -10,7 +10,7 @@ from or_pr_review.compaction import compact_history
 from or_pr_review.errors import ActionError, DivergedRangeError, SchemaError
 from or_pr_review.github_ops import GitHub
 from or_pr_review.loop import (
-    MAX_FULL_HISTORY_BYTES,
+    MAX_UNCOMPACTED_HISTORY_BYTES,
     MAX_REBASE_CONTEXT_BYTES,
     Ledger,
     LedgerFinding,
@@ -331,13 +331,13 @@ def test_compaction_full_sends_history_verbatim_and_skips_the_brief(monkeypatch,
     monkeypatch.setattr(cli, "_github", lambda env: source)
     monkeypatch.setattr(cli, "openrouter_chat", lambda *a, **k: pytest.fail("no brief in full"))
     env = environment(
-        REVIEW_SCOPE="rebase", ROLE="all", COMPACTION="full", COMPACTION_MODEL="openai/gpt-5"
+        REVIEW_SCOPE="rebase", ROLE="all", COMPACTION="none", COMPACTION_MODEL="openai/gpt-5"
     )
     collected, state, history = cli._collect_with_loop(env)
     assert long_reply in history and "Original fixed finding r1-1" in history
     assert "r1-1 fixed correctly" in history and "Rebase changed the caller" in history
     assert "<!--" not in history and collected.body_brief == ""
-    assert "history compaction: full verbatim" in capsys.readouterr().err
+    assert "history compaction: none, verbatim" in capsys.readouterr().err
     frozen = restore_context(cli._prepare_execution(env))
     assert long_reply in frozen.execution.agent_replies
 
@@ -345,10 +345,10 @@ def test_compaction_full_sends_history_verbatim_and_skips_the_brief(monkeypatch,
 def test_compaction_full_over_cap_falls_back_to_compaction(monkeypatch, capsys):
     source = Source()
     source.list_recent_issue_comments = lambda n: [
-        (f"user{k}", "c" * 20_000) for k in range(MAX_FULL_HISTORY_BYTES // 20_000 + 1)
+        (f"user{k}", "c" * 20_000) for k in range(MAX_UNCOMPACTED_HISTORY_BYTES // 20_000 + 1)
     ]
     monkeypatch.setattr(cli, "_github", lambda env: source)
-    env = environment(REVIEW_SCOPE="rebase", COMPACTION="full")
+    env = environment(REVIEW_SCOPE="rebase", COMPACTION="none")
     _, _, history = cli._collect_with_loop(env)
     assert len(history.encode()) <= MAX_REBASE_CONTEXT_BYTES
     err = capsys.readouterr().err

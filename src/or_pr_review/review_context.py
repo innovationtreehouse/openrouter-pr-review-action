@@ -16,7 +16,7 @@ from typing import Any, Literal, Union, get_args, get_origin, get_type_hints
 from or_pr_review.brief import BRIEF_MARKER_RE, MAX_MARKER_BYTES
 from or_pr_review.collect import CollectedReview
 from or_pr_review.errors import SchemaError
-from or_pr_review.loop import MAX_FULL_HISTORY_BYTES, LoopState
+from or_pr_review.loop import MAX_UNCOMPACTED_HISTORY_BYTES, LoopState
 from or_pr_review.models import parse_slug
 from or_pr_review.prompt import parse_path_profiles
 from or_pr_review.review_plan import ReviewPlan
@@ -268,7 +268,7 @@ def _validate_execution(context: ReviewContext) -> None:
         replies_bytes = len(execution.agent_replies.encode("utf-8", "strict"))
     except UnicodeEncodeError as exc:
         raise SchemaError("prepared execution replies are not valid UTF-8") from exc
-    reply_limit = MAX_FULL_HISTORY_BYTES  # compaction: full; the producer enforces tighter budgets
+    reply_limit = MAX_UNCOMPACTED_HISTORY_BYTES  # compaction: none; the producer enforces tighter budgets
     if replies_bytes > reply_limit:
         raise SchemaError(f"prepared execution replies exceed {reply_limit:,} UTF-8 bytes")
     try:

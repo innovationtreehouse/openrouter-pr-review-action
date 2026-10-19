@@ -9,7 +9,7 @@ import pytest
 from or_pr_review.collect import CollectedReview, DiffPlan, Truncation
 from or_pr_review.compaction import compact_history
 from or_pr_review.errors import SchemaError
-from or_pr_review.loop import MAX_FULL_HISTORY_BYTES, LoopState
+from or_pr_review.loop import MAX_UNCOMPACTED_HISTORY_BYTES, LoopState
 from or_pr_review.review_context import (
     CONTEXT_VERSION,
     FROZEN_RUNTIME_KEYS,
@@ -155,7 +155,7 @@ def test_runtime_restore_rejects_unknown_secrets_and_bad_shape(runtime: str) -> 
 @pytest.mark.parametrize(
     "execution",
     [
-        lambda: _execution(agent_replies="x" * (MAX_FULL_HISTORY_BYTES + 1)),
+        lambda: _execution(agent_replies="x" * (MAX_UNCOMPACTED_HISTORY_BYTES + 1)),
         lambda: _execution(runtime_json=freeze_runtime({"PERSONA": "x" * 1_001})),
         lambda: _execution(runtime_json=freeze_runtime({"CUSTOM_INSTRUCTIONS": "x" * 16_001})),
         lambda: _execution(source_run_url="https://github.com/other/repo/actions/runs/123"),

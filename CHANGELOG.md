@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Add `compaction: full`. Re-reviews skip the brief and the deterministic
+- Add `compaction: none`. Re-reviews skip the brief and the deterministic
   compaction and send earlier reviews, replies and comments verbatim, up to
   256,000 bytes; above that they fall back to compaction and log it.
 

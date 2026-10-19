@@ -214,10 +214,10 @@ inputs:
     default: "off"
   compaction:
     description: >-
-      auto (default) | off | full. On re-reviews (verify mode or rebase scope),
+      auto (default) | off | none. On re-reviews (verify mode or rebase scope),
       auto lets compaction_model write a cached brief of a long PR body and of
       history that overflows the budget. off disables that brief; the
-      deterministic history compaction still applies. full skips both: earlier
+      deterministic history compaction still applies. none skips both: earlier
       reviews, replies and comments go to the prompt verbatim up to 256,000
       bytes, and larger history falls back to deterministic compaction.
       Initial reviews are unchanged.
