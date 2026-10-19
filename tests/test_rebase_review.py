@@ -324,7 +324,7 @@ def test_rebase_rereview_with_brief_compacts_history_and_body_once(monkeypatch, 
     assert f"## Untrusted PR body\n\n```text\n{body}\n```" in user
 
 
-def test_compaction_full_sends_history_verbatim_and_skips_the_brief(monkeypatch, capsys):
+def test_compaction_none_sends_history_verbatim_and_skips_the_brief(monkeypatch, capsys):
     source = Source()
     long_reply = "argument " + "r" * 5_000  # compact_history clips replies at 2,000 chars
     source.list_rebase_replies = lambda *a: [(f"{GEN}/r1-1", "developer", long_reply)]
@@ -342,7 +342,7 @@ def test_compaction_full_sends_history_verbatim_and_skips_the_brief(monkeypatch,
     assert long_reply in frozen.execution.agent_replies
 
 
-def test_compaction_full_over_cap_falls_back_to_compaction(monkeypatch, capsys):
+def test_compaction_none_over_cap_falls_back_to_compaction(monkeypatch, capsys):
     source = Source()
     source.list_recent_issue_comments = lambda n: [
         (f"user{k}", "c" * 20_000) for k in range(MAX_UNCOMPACTED_HISTORY_BYTES // 20_000 + 1)
