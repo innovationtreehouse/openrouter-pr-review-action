@@ -2,9 +2,11 @@
 
 ## Unreleased
 
-- Add `compaction: none`. Re-reviews skip the brief and the deterministic
-  compaction and send earlier reviews, replies and comments verbatim, up to
-  256,000 bytes; above that they fall back to compaction and log it.
+- `compaction` now takes `none`, `rules` or `auto` (default, unchanged).
+  `none` sends re-review history verbatim with no brief, up to 256,000 bytes;
+  above that it falls back to `auto` and logs it. `rules` is deterministic
+  compaction with no brief. `off` still works as a deprecated alias for
+  `rules`. An invalid value now also fails verify rounds.
 
 - Cap every model's `max_tokens` at 32,768, not only Gemini. OpenRouter holds
   credit for `max_tokens` while a request is in flight, so an uncapped Opus lane

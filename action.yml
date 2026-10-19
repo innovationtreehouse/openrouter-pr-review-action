@@ -214,13 +214,14 @@ inputs:
     default: "off"
   compaction:
     description: >-
-      auto (default) | off | none. On re-reviews (verify mode or rebase scope),
-      auto lets compaction_model write a cached brief of a long PR body and of
-      history that overflows the budget. off disables that brief; the
-      deterministic history compaction still applies. none skips both: earlier
-      reviews, replies and comments go to the prompt verbatim up to 256,000
-      bytes, and larger history falls back to deterministic compaction.
-      Initial reviews are unchanged.
+      auto (default) | rules | none. Applies to re-reviews only (verify mode
+      or rebase scope); initial reviews have no history. auto applies the
+      deterministic history compaction and lets compaction_model write a
+      cached brief of a long PR body and of history that overflows the budget.
+      rules applies only the deterministic compaction, with no brief. none
+      sends earlier reviews, replies and comments verbatim with no brief, up
+      to 256,000 bytes; larger history falls back to auto. off is a
+      deprecated alias for rules.
     required: false
     default: "auto"
   compaction_model:
