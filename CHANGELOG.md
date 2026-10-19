@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- `compaction` now takes `none`, `rules` or `auto` (default, unchanged).
+  `none` sends re-review history verbatim with no brief, up to 256,000 bytes;
+  above that it falls back to `auto` and logs it. `rules` is deterministic
+  compaction with no brief. `off` still works as a deprecated alias for
+  `rules`. An invalid value now also fails verify rounds.
+
 - History compaction keeps one outcome line per replied finding and author
   (`fixed in <sha>`, `rejected`, `disputed`, `declined`, `deferred`, `settled`,
   else `replied`) and fits those lines before any verbatim text, so a fixed or

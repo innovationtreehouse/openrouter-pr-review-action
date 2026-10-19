@@ -10,6 +10,7 @@ from or_pr_review.compaction import compact_history
 from or_pr_review.errors import ActionError, DivergedRangeError, SchemaError
 from or_pr_review.github_ops import GitHub
 from or_pr_review.loop import (
+    MAX_UNCOMPACTED_HISTORY_BYTES,
     MAX_REBASE_CONTEXT_BYTES,
     Ledger,
     LedgerFinding,
@@ -315,9 +316,62 @@ def test_rebase_rereview_with_brief_compacts_history_and_body_once(monkeypatch, 
     assert cli._finish(finish_env, [lane], collected, state) == 0
     assert BRIEF_MARKER_RE.search(posted[0])
 
-    requests.clear()
-    off = environment(ROLE="all", COMPACTION="off", COMPACTION_MODEL="openai/gpt-5")
-    collected, state, history = cli._collect_with_loop(off)
-    user = cli._messages(off, collected, state, history)[1]["content"]
-    assert requests == [] and BRIEF_HEADING not in user
-    assert f"## Untrusted PR body\n\n```text\n{body}\n```" in user
+    for mode in ("rules", "off", "none"):  # off is the deprecated alias of rules
+        requests.clear()
+        quiet = environment(ROLE="all", COMPACTION=mode, COMPACTION_MODEL="openai/gpt-5")
+        collected, state, history = cli._collect_with_loop(quiet)
+        user = cli._messages(quiet, collected, state, history)[1]["content"]
+        assert requests == [] and BRIEF_HEADING not in user
+        assert f"## Untrusted PR body\n\n```text\n{body}\n```" in user
+        assert ("Summary of older history" in history) is False
+        assert (len(history.encode()) > MAX_REBASE_CONTEXT_BYTES) == (mode == "none")
+
+
+def test_compaction_none_sends_history_verbatim_and_skips_the_brief(monkeypatch, capsys):
+    source = Source()
+    long_reply = "argument " + "r" * 5_000  # compact_history clips replies at 2,000 chars
+    source.list_rebase_replies = lambda *a: [(f"{GEN}/r1-1", "developer", long_reply)]
+    monkeypatch.setattr(cli, "_github", lambda env: source)
+    monkeypatch.setattr(cli, "openrouter_chat", lambda *a, **k: pytest.fail("no brief in full"))
+    env = environment(
+        REVIEW_SCOPE="rebase", ROLE="all", COMPACTION="none", COMPACTION_MODEL="openai/gpt-5"
+    )
+    collected, state, history = cli._collect_with_loop(env)
+    assert long_reply in history and "Original fixed finding r1-1" in history
+    assert "r1-1 fixed correctly" in history and "Rebase changed the caller" in history
+    assert "<!--" not in history and collected.body_brief == ""
+    assert "history compaction: none, verbatim" in capsys.readouterr().err
+    frozen = restore_context(cli._prepare_execution(env))
+    assert long_reply in frozen.execution.agent_replies
+
+
+def test_compaction_none_over_cap_falls_back_to_auto(monkeypatch, capsys):
+    source = Source()
+    view = source.pr_view
+    source.pr_view = lambda number: {**view(number), "body": "Detail line. " * 1300}
+    source.list_recent_issue_comments = lambda n: [
+        (f"user{k}", "c" * 20_000) for k in range(MAX_UNCOMPACTED_HISTORY_BYTES // 20_000 + 1)
+    ]
+    requests = []
+    monkeypatch.setattr(cli, "_github", lambda env: source)
+    monkeypatch.setattr(cli, "openrouter_chat", lambda key, payload, **k: requests.append(1) or {})
+    env = environment(
+        ROLE="all",
+        REVIEW_SCOPE="rebase",
+        COMPACTION="none",
+        COMPACTION_MODEL="openai/gpt-5",
+        OPENROUTER_API_KEY="k",
+    )
+    _, state, history = cli._collect_with_loop(env)
+    assert state.mode == "verify" and len(history.encode()) <= MAX_REBASE_CONTEXT_BYTES
+    assert requests  # auto: the brief model was asked to compact the long PR body
+    err = capsys.readouterr().err
+    assert "exceeds the 256000 cap; falling back to auto" in err
+    assert "history compaction: before=" in err
+
+
+@pytest.mark.parametrize("bad", ["fully", "verbatim", "full,off"])
+def test_compaction_rejects_unknown_values_on_rereviews(monkeypatch, bad):
+    monkeypatch.setattr(cli, "_github", lambda env: Source())
+    with pytest.raises(ActionError, match="compaction must be"):
+        cli._collect_with_loop(environment(REVIEW_SCOPE="rebase", COMPACTION=bad))

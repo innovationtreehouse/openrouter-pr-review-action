@@ -27,7 +27,7 @@ from or_pr_review.collect import (
     parse_scope,
     resolve_mode,
 )
-from or_pr_review.compaction import compact_history
+from or_pr_review.compaction import CompactedHistory, compact_history, full_history
 from or_pr_review.errors import ActionError, SchemaError
 from or_pr_review.github_ops import GitHub, require_full_sha, upsert_status_comment
 from or_pr_review.harness import (
@@ -45,6 +45,7 @@ from or_pr_review.judge import (
     run_llm_judge,
 )
 from or_pr_review.loop import (
+    MAX_UNCOMPACTED_HISTORY_BYTES,
     MAX_REBASE_CONTEXT_BYTES,
     MAX_REPLIES_BYTES,
     Ledger,
@@ -1414,7 +1415,9 @@ def _collect_with_loop(
             raise ActionError("review history changed while acquiring rebase context; retry")
         # History is part of this review's contract. A failed history read must
         # not silently downgrade a rebase into a review without its rebuttals.
-        history = compact_history(
+        history, session = _history(
+            env,
+            session,
             budget=MAX_REBASE_CONTEXT_BYTES,
             bot_login=_bot_login(env),
             review_bodies=bodies,
@@ -1422,17 +1425,20 @@ def _collect_with_loop(
             comments=github.list_recent_issue_comments(pr_number),
             carried_ids={f"{state.generation}/{finding.id}" for finding in state.prior_findings},
             ledger_findings=state.prior_findings,
-            summary_for_evicted=session.summarize_evicted if session else None,
         )
-        print(history.stats_line(), file=sys.stderr)
         return _apply_brief(session, collected, history.summarized), state, history.text
     if with_replies and state.mode == "verify":
+        fallback = session
+        if _compaction_mode(env) == "none":  # a bad value fails here, not as a failed fetch
+            session = None  # no brief unless _history falls back to auto over the cap
         try:
             # Replies to findings the severity floor retired would reintroduce
             # the retired context and invite re-adjudication; only threads for
             # carried findings (open or disputed) reach the prompt.
             carried_ids = {finding.id for finding in state.prior_findings}
-            history = compact_history(
+            history, session = _history(
+                env,
+                fallback,
                 budget=MAX_REPLIES_BYTES,
                 bot_login=_bot_login(env),
                 replies=[
@@ -1441,9 +1447,7 @@ def _collect_with_loop(
                     if reply[0] in carried_ids
                 ],
                 comments=github.list_recent_issue_comments(pr_number),
-                summary_for_evicted=session.summarize_evicted if session else None,
             )
-            print(history.stats_line(), file=sys.stderr)
             agent_replies, summarized = history.text, history.summarized
         except ActionError as exc:
             print(
@@ -1451,6 +1455,40 @@ def _collect_with_loop(
                 f"commits only: {redact(str(exc))}"
             )
     return _apply_brief(session, collected, summarized), state, agent_replies
+
+
+def _compaction_mode(env: dict[str, str]) -> str:
+    """none | rules | auto; `off` is the deprecated alias of `rules`."""
+    mode = (env.get("COMPACTION") or "auto").strip().lower()
+    if mode not in {"auto", "rules", "off", "none"}:
+        raise ActionError("compaction must be 'none', 'rules' or 'auto' ('off' means 'rules')")
+    return "rules" if mode == "off" else mode
+
+
+def _history(
+    env: dict[str, str], session: BriefSession | None, **kwargs: Any
+) -> tuple[CompactedHistory, BriefSession | None]:
+    """compaction: none keeps history verbatim (and drops the brief) up to
+    MAX_UNCOMPACTED_HISTORY_BYTES; above it, or in rules/auto, compacts with `session`."""
+    if _compaction_mode(env) == "none":
+        full = full_history(
+            bot_login=kwargs["bot_login"],
+            review_bodies=kwargs.get("review_bodies"),
+            replies=kwargs["replies"],
+            comments=kwargs["comments"],
+        )
+        if full.bytes_after <= MAX_UNCOMPACTED_HISTORY_BYTES:
+            print(f"history compaction: none, verbatim bytes={full.bytes_after}", file=sys.stderr)
+            return full, None
+        print(
+            f"history compaction: none, history {full.bytes_after} bytes exceeds the "
+            f"{MAX_UNCOMPACTED_HISTORY_BYTES} cap; falling back to auto",
+            file=sys.stderr,
+        )
+    summary = session.summarize_evicted if session else None
+    history = compact_history(summary_for_evicted=summary, **kwargs)
+    print(history.stats_line(), file=sys.stderr)
+    return history, session
 
 
 def _review_event(env: dict[str, str], verdict: str, open_issues: int) -> str:
@@ -1486,12 +1524,11 @@ def _brief_session(
     """Re-reviews only; an empty compaction_model keeps the deterministic path."""
     if state.mode != "verify":
         return None
-    compaction = (env.get("COMPACTION") or "auto").strip().lower()
-    if compaction not in {"auto", "off"}:
-        raise ActionError("compaction must be 'auto' or 'off'")
+    # none still builds the session: history over the cap falls back to auto.
+    compaction = _compaction_mode(env)
     raw_model = (env.get("COMPACTION_MODEL") or "").strip()
     model = parse_slug(raw_model, what="compaction_model") if raw_model else ""
-    if compaction == "off":
+    if compaction == "rules":
         model = ""
     bodies: list[str] = []
     if model:

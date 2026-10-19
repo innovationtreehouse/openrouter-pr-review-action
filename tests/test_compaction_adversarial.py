@@ -996,7 +996,7 @@ def test_compaction_off_without_a_model_and_unknown_values():
     env = {"GITHUB_REPOSITORY": REPO}
     s = cli._brief_session(env, None, collected(body="B" * 5000), LoopState("verify", 2))  # type: ignore[arg-type]
     assert s.compact_body() == ("B" * 5000, "")
-    for bad in ("on", "false", "0", "auto,off", "none"):
+    for bad in ("on", "false", "0", "auto,off", "verbatim", "full"):
         with pytest.raises(ActionError):
             cli._brief_session(
                 {**env, "COMPACTION": bad},

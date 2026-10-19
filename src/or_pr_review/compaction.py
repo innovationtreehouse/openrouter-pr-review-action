@@ -178,6 +178,43 @@ def compact_history(
     return CompactedHistory(text, before, _size(text), dropped, summarized=bool(summary))
 
 
+def full_history(
+    *,
+    bot_login: str,
+    review_bodies: list[str] | None = None,
+    replies: list[tuple[str, str, str]],
+    comments: list[tuple[str, str]],
+) -> CompactedHistory:
+    """`compaction: none`: every review, reply and comment verbatim (markers and status noise
+    removed, nothing deduped, digested or clipped). The caller enforces the size cap."""
+    scrub = scrub_surrogates
+    blocks: list[str] = []
+    reviews = [
+        text
+        for body in review_bodies or []
+        if (text := _strip_markers(scrub(body)).strip()) and not _is_status(body)
+    ]
+    if reviews:
+        heading = "Historical bot reviews, oldest first. These describe earlier code; current"
+        heading += " code must establish every conclusion."
+        blocks.append(heading + "\n\n" + "\n\n".join(reviews))
+    reply_items = [
+        f"Reply to finding {scrub(fid)} (from {scrub(login)}):\n{scrub(body).strip()}"
+        for fid, login, body in replies
+    ]
+    if reply_items:
+        blocks.append("Replies on findings:\n" + "\n\n".join(reply_items))
+    comment_items = [
+        f"PR comment (from {scrub(login)}):\n{_strip_markers(scrub(body)).strip()}"
+        for login, body in comments
+        if scrub(login) != bot_login and not _is_status(body) and _strip_markers(body).strip()
+    ]
+    if comment_items:
+        blocks.append(_HEADINGS["comments"] + "\n" + "\n\n".join(comment_items))
+    text = "\n\n".join(blocks)
+    return CompactedHistory(text, _size(text), _size(text))
+
+
 def _allocate(
     sections: dict[str, list[str]], budget: int
 ) -> tuple[dict[str, list[str]], list[tuple[str, str]]]:
