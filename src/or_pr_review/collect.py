@@ -114,8 +114,8 @@ class Truncation:
                 "header, +/- counts, and a first-hunk reference, with no "
                 f"reviewable hunks: {self._stub_names()}. Each stubbed file's "
                 "current content is in the checkout for the read-only tools "
-                "(deleted-line specifics exist only as counts), and each one "
-                "still requires a full sweep and its own coverage entry. No "
+                "(deleted lines, and whole deleted files, exist only as counts), "
+                "and each one still requires a full sweep and its own coverage entry. No "
                 "changed file was dropped, so with the stub accounting this "
                 "review still covers every changed file."
             )

@@ -9,6 +9,7 @@ from or_pr_review.errors import ActionError
 from or_pr_review.prompt import changed_paths_from_diff, diff_right_side_lines
 from or_pr_review.publish import decide_verdict
 from or_pr_review.triage import (
+    REASON_DELETED,
     REASON_GENERATED,
     REASON_OVER_BUDGET,
     accounted_path,
@@ -142,7 +143,7 @@ def test_deleted_file_accounts_under_old_path() -> None:
     assert segments[0].path == "gone.py"
 
 
-def test_deleted_file_is_never_stubbed_as_tool_readable() -> None:
+def test_deleted_file_stub_is_not_tool_readable() -> None:
     deleted = (
         "diff --git a/gone.lock b/gone.lock\n"
         "deleted file mode 100644\n"
@@ -152,12 +153,14 @@ def test_deleted_file_is_never_stubbed_as_tool_readable() -> None:
         + "".join(f"-removed-{index:03d}-" + "x" * 40 + "\n" for index in range(300))
     )
     truncation = pack_diff(deleted, 1)
-    assert "gone.lock" not in truncation.stubbed_files
-    assert truncation.dropped_files == ("gone.lock",)
-    assert truncation.forces_partial
+    assert truncation.stubbed_files == ("gone.lock",)
+    assert truncation.dropped_files == ()
+    assert not truncation.forces_partial
+    assert REASON_DELETED in truncation.text
+    assert "current content is in the checkout" not in truncation.text
 
 
-def test_binary_deleted_file_is_never_stubbed_as_tool_readable() -> None:
+def test_binary_deleted_file_stub_is_not_tool_readable() -> None:
     deleted = (
         "diff --git a/gone.lock b/gone.lock\n"
         "deleted file mode 100644\n"
@@ -169,9 +172,11 @@ def test_binary_deleted_file_is_never_stubbed_as_tool_readable() -> None:
     assert parsed is not None
     assert parsed[1][0].is_deleted
     truncation = pack_diff(deleted, 1)
-    assert "gone.lock" not in truncation.stubbed_files
-    assert truncation.dropped_files == ("gone.lock",)
-    assert truncation.forces_partial
+    assert truncation.stubbed_files == ("gone.lock",)
+    assert truncation.dropped_files == ()
+    assert not truncation.forces_partial
+    assert REASON_DELETED in truncation.text
+    assert "current content is in the checkout" not in truncation.text
 
 
 def test_binary_dev_null_marker_alone_identifies_deletion() -> None:
@@ -297,6 +302,42 @@ def test_tiny_generated_file_embeds_when_stub_is_larger() -> None:
     truncation = pack_diff(tiny_lock + filler, 2)
     assert "tiny.lock" not in truncation.stubbed_files
     assert tiny_lock in truncation.text
+
+
+def _deleted_file_diff(path: str, removed_lines: int) -> str:
+    """A whole-file deletion segment shaped like the deleted fixtures above."""
+    return (
+        f"diff --git a/{path} b/{path}\n"
+        "deleted file mode 100644\n"
+        f"--- a/{path}\n"
+        "+++ /dev/null\n"
+        f"@@ -1,{removed_lines} +0,0 @@\n" + "".join(f"-{'x' * 40}\n" for _ in range(removed_lines))
+    )
+
+
+def test_many_deleted_files_all_stub_and_none_drop() -> None:
+    deleted = "".join(_deleted_file_diff(f"d{i:03}.py", 30) for i in range(400))
+    kept = _file_diff("src/kept.py", 3)
+    max_diff_kb = 250
+    diff = deleted + kept
+    assert len(diff.encode("utf-8")) > max_diff_kb * 1024
+    truncation = pack_diff(diff, max_diff_kb)
+    assert len(truncation.stubbed_files) == 400
+    assert truncation.dropped_files == ()
+    assert not truncation.forces_partial
+    assert kept in truncation.text
+    assert len(truncation.text.encode("utf-8")) <= max_diff_kb * 1024
+
+
+def test_deletion_stubs_before_same_size_hand_written_edit() -> None:
+    deleted = _deleted_file_diff("gone.py", 30)
+    kept = _file_diff("src/kept.py", 18)
+    assert abs(len(deleted.encode("utf-8")) - len(kept.encode("utf-8"))) < 64
+    # One full segment plus one stub fits; both full segments do not.
+    truncation = pack_diff(deleted + kept, 2)
+    assert "gone.py" in truncation.stubbed_files
+    assert "src/kept.py" not in truncation.stubbed_files
+    assert kept in truncation.text
 
 
 def test_genuine_overflow_drops_files_and_forces_partial() -> None:
@@ -449,3 +490,9 @@ def test_gitattributes_double_star_slash_matches_zero_segments() -> None:
     rules = parse_gitattributes("src/**/generated/*.json linguist-generated\n")
     assert classify_generated("src/generated/a.json", attr_rules=rules)
     assert classify_generated("src/x/y/generated/a.json", attr_rules=rules)
+
+
+def test_added_line_resembling_dev_null_header_is_not_a_deletion() -> None:
+    diff = "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -0,0 +1 @@\n+++ /dev/null\n"
+    _, segments = split_diff(diff)  # type: ignore[misc]
+    assert not segments[0].is_deleted
