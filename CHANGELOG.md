@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- `judge_mode: pick` lets a systemone decision model (`decision_model`,
+  default `baseten/mammoth-1:free`) choose which lane review to post, in place
+  of the chat-model union merge. The chosen lane posts as a single lane would.
+  Over `decision_state_max` the decision state is compacted step by step, and
+  any failure posts the labeled deterministic union. `merge` stays the default.
+
 - `compaction` now takes `none`, `rules` or `auto` (default, unchanged).
   `none` sends re-review history verbatim with no brief, up to 256,000 bytes;
   above that it falls back to `auto` and logs it. `rules` is deterministic

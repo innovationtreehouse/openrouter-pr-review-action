@@ -46,6 +46,29 @@ inputs:
       that surviving lane posts directly because there is nothing to merge.
     required: false
     default: ""
+  judge_mode:
+    description: >-
+      merge (default) union-merges lane findings with judge_model. pick asks
+      decision_model on OpenRouter's decision_endpoint which lane review to post
+      and posts that lane as a single-lane review would; any failure posts the
+      labeled deterministic union.
+    required: false
+    default: "merge"
+  decision_model:
+    description: "Pick mode only: the Jev-protocol decision model slug."
+    required: false
+    default: "baseten/mammoth-1:free"
+  decision_endpoint:
+    description: "Pick mode only: the OpenRouter API path the decision model answers on."
+    required: false
+    default: "systemone"
+  decision_state_max:
+    description: >-
+      Pick mode only: decision state cap in bytes. The default fits Mammoth's
+      16,384-token context. Over the cap the state is compacted step by step
+      (see README); it is never cut blind.
+    required: false
+    default: "48000"
   github_token:
     description: "Token used to read the PR and post comments/reviews."
     required: false
@@ -346,6 +369,10 @@ runs:
         MODEL_ROUTES: ${{ inputs.model_routes }}
         JUDGE_MODEL: ${{ inputs.judge_model }}
         JUDGE_NEEDED: ${{ inputs.judge_needed }}
+        JUDGE_MODE: ${{ inputs.judge_mode }}
+        DECISION_MODEL: ${{ inputs.decision_model }}
+        DECISION_ENDPOINT: ${{ inputs.decision_endpoint }}
+        DECISION_STATE_MAX: ${{ inputs.decision_state_max }}
         GITHUB_TOKEN: ${{ inputs.github_token }}
         GH_TOKEN: ${{ inputs.github_token }}
         GITHUB_TIMEOUT_SECONDS: ${{ inputs.github_timeout_seconds }}

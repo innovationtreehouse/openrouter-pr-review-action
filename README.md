@@ -350,6 +350,22 @@ Alternatives (do not change the default unless you mean to):
 
 A judge schema or transport failure is labeled on the posted review and falls back to the deterministic coverage-preserving union, subject to the same visible 80-finding publishing cap. Invalid lane artifacts or action-wide contract errors still fail closed.
 
+### Pick mode (`judge_mode: pick`)
+
+Instead of merging, a decision model picks the one lane review to post. It is a Jev-protocol model (default `baseten/mammoth-1:free`) called on OpenRouter's `systemone` endpoint with a state object and typed questions, not a chat model. It answers one `choice` question (which lane's review is better: more real, evidenced findings, fewer false positives, correct severities) and one `noul` per lane (safe to post as-is). The most probable known lane is posted exactly as a single-lane run would post it: its findings, inline comments, resolutions and model attribution. The review header reads `Judge: Picked by <decision_model> from N lanes: <lane model> (lane_K; p=…; safe-to-post …)`. Unpicked lanes still appear under Lanes with their cost. If the state cannot be built or compacted, the call fails or times out, or no known lane comes back, the review posts the deterministic union, labeled `pick <stage> fallback: deterministic union`. Pick mode shares the merge judge's time window.
+
+The state lists the lane reviews first: per lane, the verdict, tool rounds, duration, flags, and every finding with a stable id (`lane_1.F3`), title, severity, `file:line` and evidence. Then come the change (base and head SHAs, per-file add/delete counts, the embedded diff), earlier rounds (the ledger, bot review bodies, finding replies), the review setup (policy, `path_profiles`, `custom_instructions`), and the PR (title, body, human comments). `decision_state_max` (default 48,000 bytes) caps the state. Mammoth's context is 16,384 tokens, and 48 KB of JSON fits beside the questions. Size is measured item by item. A state under the cap is sent unchanged. Over the cap, these steps run in order, largest item first, and stop as soon as the state fits:
+
+1. Strip HTML comments (ledger and brief markers) and drop duplicate entries from earlier-round, setup and PR text.
+2. Collapse unchanged diff context to the lines a finding cites plus 3 lines on each side.
+3. Summarize PR body, human comments and setup text with `compaction_model` (the re-review brief: intent, claims, quoted requests). Text is chunked to the brief's 96 KB input limit, summarized chunk by chunk, then the summaries are summarized again, at most 6 rounds.
+4. Reduce each diff file to its header, hunk headers (with function names) and every cited line verbatim. Then fold uncited files into per-top-directory counts.
+5. Reduce earlier review bodies to one-line digests and replies to one outcome line each.
+6. Condense lane evidence prose only. Finding ids, titles, severities, locations and verdicts never change.
+7. Terminal step, if still over: keep the lane findings without evidence and reduce every other section to one line. The step is logged.
+
+The state's `compaction` header records each step with item counts and before/after bytes. If a summary is needed and `compaction_model` is empty (or `compaction: rules`), or the model returns nothing, the review falls back to the union. A diff GitHub refuses (HTTP 406) already arrives through the local `git diff base...head` fallback.
+
 In `role: all`, reviewers finish up to five seconds before the coordinator stops
 collecting results, leaving time to save their final diagnostics. The judge and
 publication allowances described above remain outside that collection deadline.
@@ -562,6 +578,10 @@ for your account and action revision.
 | `model_routes` | empty | Trusted JSON keyed by exact review model slug, with optional `provider` and `service_tier` (`default`, `flex`, `priority`). Provider pins disable fallbacks. At most four entries and 8,000 UTF-8 bytes. Unlisted lanes and the judge retain their existing routing. Never interpolate PR content. |
 | `judge_model` | `openai/gpt-5.6-luna` | Independent of `models`. Used whenever judging is enabled. |
 | `judge_needed` | _empty_ | `true` enables the judge (and forces it for one configured lane); `false` skips it. Empty infers from `models`. A sole survivor from a multi-lane run posts directly. |
+| `judge_mode` | `merge` | `merge` union-merges findings with `judge_model`. `pick` lets `decision_model` choose one lane review to post ([pick mode](#pick-mode-judge_mode-pick)). |
+| `decision_model` | `baseten/mammoth-1:free` | Pick mode only. Jev-protocol decision model slug. |
+| `decision_endpoint` | `systemone` | Pick mode only. OpenRouter API path the decision model answers on. |
+| `decision_state_max` | `48000` | Pick mode only. Decision state cap in bytes (minimum 4,000). Over it the state is compacted step by step, never cut blind. |
 | `github_token` | `${{ github.token }}` | Needs `pull-requests: write` to post the review. |
 | `github_timeout_seconds` | `120` | Per-operation `gh` or fallback local-git timeout; 1–600. |
 | `job_budget_seconds` | `1320` | Total action budget measured from Python startup. Keep this below the enclosing job timeout so publication and cleanup retain time. |
