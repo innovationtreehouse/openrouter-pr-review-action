@@ -804,7 +804,7 @@ def _judge_mode(env: dict[str, str]) -> str:
     return mode
 
 
-def _decision_settings(env: dict[str, str]) -> tuple[str, str, int]:
+def _decision_settings(env: dict[str, str]) -> tuple[str, str, int, int]:
     raw = (env.get("DECISION_MODEL") or "").strip() or pick.DEFAULT_DECISION_MODEL
     model = parse_slug(raw, what="decision_model")
     endpoint = (env.get("DECISION_ENDPOINT") or "").strip() or pick.DEFAULT_DECISION_ENDPOINT
@@ -813,7 +813,15 @@ def _decision_settings(env: dict[str, str]) -> tuple[str, str, int]:
     cap = _int_env(env, "DECISION_STATE_MAX", pick.DEFAULT_STATE_MAX)
     if cap < 4_000:
         raise ActionError("decision_state_max must be at least 4000 bytes")
-    return model, endpoint, cap
+    tokens = _int_env(env, "DECISION_STATE_MAX_TOKENS", pick.DEFAULT_STATE_MAX_TOKENS)
+    if tokens < 1_000:
+        raise ActionError("decision_state_max_tokens must be at least 1000")
+    return model, endpoint, cap, tokens
+
+
+def _diagnostics_only(lane: LaneResult) -> bool:
+    reviewable, diagnostics = partition_reviewable_lanes([lane.to_dict()])
+    return bool(diagnostics) and not reviewable[0]["findings"]
 
 
 def _resolve_pick(
@@ -825,29 +833,49 @@ def _resolve_pick(
     loop: LoopState | None,
 ) -> JudgeOutcome:
     """The decision model picks one lane to post; any failure posts the labeled union."""
-    model, endpoint, cap = _decision_settings(env)
+    model, endpoint, cap, cap_tokens = _decision_settings(env)
+    costs: list[float | None] = []
 
-    def fallback(stage: str, reason: str) -> JudgeOutcome:
+    def fallback(stage: str, reason: str, label: str = "") -> JudgeOutcome:
         print(f"warning: pick {stage} failed ({redact(reason)}); using the deterministic union")
+        label = label or f"pick {stage} fallback"
         issues, note = _capped_union_note(
-            lane_payloads, f"`{model}` (pick {stage} fallback: deterministic union)"
+            lane_payloads, f"`{model}` ({label}: deterministic union)"
         )
-        return JudgeOutcome(issues, note, None, stage != "deadline", diagnostics)
+        cost = pick.combined_cost(costs) if costs else None
+        return JudgeOutcome(issues, note, cost, stage != "deadline", diagnostics)
 
+    # A lane that could not read the checkout looks clean; it is never a candidate.
+    candidates = [lane for lane in successful if not _diagnostics_only(lane)]
+    if not candidates:
+        return fallback("candidates", "every lane reported only review-environment diagnostics")
+    if len(candidates) == 1:
+        lane = candidates[0]
+        print(f"pick skipped: only `{lane.model}` has code review results; posting it directly")
+        return JudgeOutcome(
+            issues_from_single_lane(lane),
+            "skipped (other lanes reported only review-environment diagnostics)",
+            None,
+            False,
+            partition_reviewable_lanes([lane.to_dict()])[1],
+            picked=lane,
+        )
     timeout = _judge_request_timeout(env)
     if timeout is None:
         return fallback("deadline", "too little job time left for a decision call")
     if collected is None:
         return fallback("state", "no collected review context")
     deadline = _judge_deadline(env, timeout)
-    ids = pick.lane_ids(successful)
+    ids = pick.lane_ids(candidates)
     try:
         key = require_openrouter_key(env)
-        state = pick.State(_pick_items(env, collected, loop, successful), cap)
-        calls = pick.fit_state(state, successful, _compaction_brief_fn(env, key, deadline))
+        state = pick.State(_pick_items(env, collected, loop, candidates), cap, cap_tokens)
+        calls = pick.fit_state(state, candidates, _compaction_brief_fn(env, key, deadline, costs))
         print(
-            f"pick state: {state.bytes_before} -> {state.total()} bytes (cap {cap}, "
-            f"{calls} compaction call(s)); applied {state.header()['applied']}"
+            f"pick state: {state.bytes_before} -> {state.total()} bytes, "
+            f"~{state.tokens_before} -> ~{state.total_tokens()} tokens (caps {cap} bytes, "
+            f"{cap_tokens} tokens; {calls} compaction call(s)); "
+            f"applied {state.header()['applied']}"
         )
     except Exception as exc:  # noqa: BLE001 - every state failure falls back
         return fallback("compaction", str(exc))
@@ -858,67 +886,83 @@ def _resolve_pick(
             endpoint=endpoint,
             api_key=key,
             state=state.render(),
-            qs=pick.questions(ids, successful),
+            qs=pick.questions(ids, candidates),
             timeout=timeout,
             deadline=deadline,
         )
+        costs.append(pick.response_cost(response, model))
         chosen, p, safe = pick.parse_pick(response, ids)
     except Exception as exc:  # noqa: BLE001 - transport or answer failure falls back
         return fallback("decision", str(exc))
-    lane = successful[ids.index(chosen)]
+    lane = candidates[ids.index(chosen)]
     print(f"pick: {chosen} ({lane.model}) p={p} safe={safe}")
+    if safe.get(chosen, 1.0) < pick.SAFE_TO_POST_MIN:
+        return fallback(
+            "safety",
+            f"{chosen} safe-to-post {safe[chosen]}",
+            "pick: chosen lane judged unsafe to post",
+        )
     return JudgeOutcome(
         issues_from_single_lane(lane),
-        pick.pick_note(model, ids, chosen, successful, p, safe, state),
-        pick.response_cost(response, model),
+        pick.pick_note(model, ids, chosen, candidates, p, safe, state),
+        pick.combined_cost(costs),
         True,
         partition_reviewable_lanes([lane.to_dict()])[1],
         picked=lane,
     )
 
 
+TRUSTED_ASSOCIATIONS = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})
+
+
 def _pick_items(
     env: dict[str, str],
     collected: CollectedReview,
     loop: LoopState | None,
-    successful: list[LaneResult],
+    lanes: list[LaneResult],
 ) -> list[pick.Item]:
     github, bot = _github(env), _bot_login(env)
 
-    def best_effort(what: str, read: Any) -> list[Any]:
+    def best_effort(what: str, read: Any, default: Any) -> Any:
         try:
             return read()
         except ActionError as exc:
             print(f"warning: pick state could not read {what}: {redact(str(exc))}")
-            return []
+            return default
 
     pr = collected.pr_number
     generation = loop.generation if loop is not None else ""
     policy = collected.review_policy
+    # The router's trust rule: PR text only from owners, members and collaborators.
+    author = best_effort("the PR author", lambda: github.pr_author_association(pr), "")
     return pick.build_items(
         collected=collected,
         loop=loop,
-        lanes=successful,
-        review_bodies=best_effort("prior reviews", lambda: github.list_bot_review_bodies(pr, bot)),
-        replies=best_effort(
-            "finding replies", lambda: github.list_finding_replies(pr, generation=generation)
+        lanes=lanes,
+        review_bodies=best_effort(
+            "prior reviews", lambda: github.list_bot_review_bodies(pr, bot), []
         ),
-        comments=[
-            (login, body)
-            for login, body in best_effort(
-                "PR comments", lambda: github.list_recent_issue_comments(pr)
-            )
-            if not login.endswith("[bot]")
-        ],
+        replies=best_effort(
+            "finding replies", lambda: github.list_finding_replies(pr, generation=generation), []
+        ),
+        comments=best_effort(
+            "PR comments",
+            lambda: github.list_recent_issue_comments(pr, associations=TRUSTED_ASSOCIATIONS),
+            [],
+        ),
         setup={
             "review_policy": f"{policy.profile}/{policy.minimum}" if policy else "",
             "path_profiles": env.get("PATH_PROFILES") or "",
             "custom_instructions": env.get("CUSTOM_INSTRUCTIONS") or "",
         },
+        pr_body=collected.body if author in TRUSTED_ASSOCIATIONS else "",
     )
 
 
-def _compaction_brief_fn(env: dict[str, str], key: str, deadline: float | None) -> pick.BriefFn:
+def _compaction_brief_fn(
+    env: dict[str, str], key: str, deadline: float | None, costs: list[float | None]
+) -> pick.BriefFn:
+    """Brief one chunk with compaction_model; each response's spend lands in `costs`."""
     raw = "" if _compaction_mode(env) == "rules" else (env.get("COMPACTION_MODEL") or "").strip()
     model = parse_slug(raw, what="compaction_model") if raw else ""
     route = parse_model_routes(env.get("MODEL_ROUTES")).get(model, {}) if model else {}
@@ -931,7 +975,9 @@ def _compaction_brief_fn(env: dict[str, str], key: str, deadline: float | None) 
             raise pick.PickError("no time left for the compaction model")
 
         def chat(payload: dict[str, Any]) -> dict[str, Any]:
-            return openrouter_chat(key, payload, timeout=max(1, int(left)), deadline=deadline)
+            response = openrouter_chat(key, payload, timeout=max(1, int(left)), deadline=deadline)
+            costs.append(pick.response_cost(response, model))
+            return response
 
         return build_brief({"source": chunk}, model=model, chat=chat, route=route)
 
