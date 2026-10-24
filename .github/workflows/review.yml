@@ -37,9 +37,10 @@ jobs:
     permissions:
       contents: read
       pull-requests: write
-    # Unrelated label events get their own group so they cannot cancel a running review.
+    # Unrelated label events get their own group so they cannot cancel a running review. A name
+    # callers never use, so an old workflow-level group cannot deadlock against it.
     concurrency:
-      group: openrouter-review-${{ github.event.pull_request.number }}-${{ (github.event.action == 'labeled' && github.event.label.name != 'ai-review') && github.run_id || 'review' }}
+      group: ai-review-routed-${{ github.event.pull_request.number }}-${{ (github.event.action == 'labeled' && github.event.label.name != 'ai-review') && github.run_id || 'review' }}
       cancel-in-progress: true
     # One review plus at most one rerun, each under the action's 22-minute budget.
     timeout-minutes: 50

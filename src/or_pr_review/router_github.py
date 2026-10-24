@@ -365,6 +365,7 @@ def pending_questions(review_comments, issue_comments):
             if kind == "r" and any(
                 (x.get("in_reply_to_id") or x["id"]) == root
                 and (x.get("user") or {}).get("login") != BOT
+                and _trusted(x)
                 for x in comments[pos + 1 :]
             ):
                 continue
@@ -460,7 +461,7 @@ def answer():
                 "\n".join(
                     f"{(x.get('user') or {}).get('login')}: {_clean(x.get('body'), 1500)}"
                     for x in rc
-                    if (x.get("in_reply_to_id") or x["id"]) == root
+                    if (x.get("in_reply_to_id") or x["id"]) == root and _trusted(x)
                 )
                 if kind == "r"
                 else ""

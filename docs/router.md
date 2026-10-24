@@ -33,13 +33,13 @@ fails). Secret: `OPENROUTER_API_KEY`.
 
 ## `router.json`
 
-Every key is optional. An unknown key or a broken ladder fails the route step, which fails the job. Defaults:
+Every key is optional. An unknown key, a value of the wrong type (`"false"` is not `false`), a rung missing any of its seven keys, a string containing a newline, or a broken ladder fails every router step, and the job with it. Defaults:
 
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `decision_model` | `baseten/mammoth-1:free` | Router, judge and pick-mode decision model |
 | `decision_state_max` | `48000` | Decision-state cap in bytes; the token cap is a quarter of it. Jev 1.14 takes `1500000` |
-| `compaction_model` | `nvidia/nemotron-3.5-super-vl:free` | Summarizes long PR text when the state is over the cap; also the action's `compaction_model`. `""` disables both |
+| `compaction_model` | `nvidia/nemotron-3.5-super-vl:free` | The action's `compaction_model` (re-review brief). `""` disables it. The router's own state fitting never calls a model |
 | `judge_mode` | `pick` | Action `judge_mode` for multi-lane rungs |
 | `approve` | `off` | Action `approve` input |
 | `first_round_lowest` | `true` | A PR's first review uses the lowest rung unless the fixed ladder says `high` or trusted PR text asks for a tier |
@@ -96,16 +96,17 @@ whitespace change asking for `top`). It also lifts `first_round_lowest` for that
 
 ## Decision-state compaction
 
-Route and adjudicate send the decision model the PR title, trusted PR text, the per-file diff,
-every earlier AI review round (body, inline comments and the diff it covered) and, for adjudicate,
-the posted review. Nothing is cut. Under `decision_state_max` the state goes unchanged; over it,
-the same tiered compactor pick mode uses (`pick.fit_state`) runs, largest items first, stopping as
-soon as the state fits: strip HTML comments, drop duplicates, collapse unchanged diff context,
-summarize long PR text with `compaction_model` (map-reduce, so any length), reduce diffs to file
-headers and hunk headers, fold the remaining files into per-directory counts, digest earlier rounds
-to one line each, condense the posted review, and finally one line per section. The state header
-records every step applied. If compaction fails (for example the compaction model is down), the
-router uses its deterministic fallbacks for that decision.
+Route and adjudicate send the decision model the PR title, the per-file diff, every earlier AI
+review round (body, inline comments and, under `files` as `round_N/<path>`, the diff it covered),
+trusted PR text and, for adjudicate, the posted review. Nothing is cut. Under `decision_state_max`
+the state goes unchanged. Over it, earlier rounds' diffs fold first into per-round, per-directory
+counts (largest first, until the state fits), as the old router dropped them first. Then pick
+mode's tiered compactor (`pick.fit_state`) runs, largest items first, stopping as soon as the state
+fits: strip HTML comments, drop duplicates, collapse unchanged diff context, reduce diffs to file
+and hunk headers, fold the remaining files into per-directory counts, digest earlier rounds to one
+line each, condense trusted PR text and the posted review (they sit in `lanes`, which goes last),
+and finally one line per section. The state header records every step. No step calls a model, so
+the fitting is deterministic and works at any input size.
 
 ## Running the router by hand
 

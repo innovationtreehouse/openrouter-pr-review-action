@@ -441,6 +441,8 @@ jobs:
       OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
 ```
 
+`review.yml` sets its own job concurrency group (`ai-review-routed-<PR>-...`). Do not add a workflow-level `concurrency:` block that reuses that name; drop the old per-repo `openrouter-review-*` block when migrating.
+
 ## Recommended caller concurrency
 
 This action runs **one review per invocation**. It does not implement workflow concurrency or org-specific merge gates (those belong in your reusable caller).
