@@ -243,8 +243,15 @@ class GitHub:
             and isinstance(comment.get("body"), str)
         ]
 
-    def list_recent_issue_comments(self, number: int, limit: int = 30) -> list[tuple[str, str]]:
-        """(login, body) for the newest PR conversation comments, oldest first."""
+    def pr_author_association(self, number: int) -> str:
+        raw = self._gh("api", f"repos/{self.repository}/pulls/{number}")
+        return str(_json_object(raw, "pull request").get("author_association") or "")
+
+    def list_recent_issue_comments(
+        self, number: int, limit: int = 30, *, associations: frozenset[str] | None = None
+    ) -> list[tuple[str, str]]:
+        """(login, body) for the newest PR conversation comments, oldest first.
+        `associations`, when given, keeps only comments whose author_association is in it."""
         comments = self._paginated_list(
             f"repos/{self.repository}/issues/{number}/comments", "issue comments"
         )
@@ -254,6 +261,8 @@ class GitHub:
             if not isinstance(body, str) or STATUS_MARKER in body:
                 continue
             if body.startswith(_BOT_BODY_PREFIXES):
+                continue
+            if associations is not None and comment.get("author_association") not in associations:
                 continue
             recent.append((_comment_login(comment), body))
         return recent[-limit:]

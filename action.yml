@@ -64,11 +64,18 @@ inputs:
     default: "systemone"
   decision_state_max:
     description: >-
-      Pick mode only: decision state cap in bytes. The default fits Mammoth's
-      16,384-token context. Over the cap the state is compacted step by step
-      (see README); it is never cut blind.
+      Pick mode only: upper bound on the decision state in UTF-8 bytes; the
+      token estimate below is the main cap. Over either cap the state is
+      compacted step by step (see README); it is never cut blind.
     required: false
     default: "48000"
+  decision_state_max_tokens:
+    description: >-
+      Pick mode only: decision state cap in estimated tokens (prose ~4 chars per
+      token, dense hex/base64 ~2, CJK ~1.5). The default leaves ~4,000 of
+      Mammoth's 16,384 tokens for the questions and prompt.
+    required: false
+    default: "12000"
   github_token:
     description: "Token used to read the PR and post comments/reviews."
     required: false
@@ -373,6 +380,7 @@ runs:
         DECISION_MODEL: ${{ inputs.decision_model }}
         DECISION_ENDPOINT: ${{ inputs.decision_endpoint }}
         DECISION_STATE_MAX: ${{ inputs.decision_state_max }}
+        DECISION_STATE_MAX_TOKENS: ${{ inputs.decision_state_max_tokens }}
         GITHUB_TOKEN: ${{ inputs.github_token }}
         GH_TOKEN: ${{ inputs.github_token }}
         GITHUB_TIMEOUT_SECONDS: ${{ inputs.github_timeout_seconds }}
