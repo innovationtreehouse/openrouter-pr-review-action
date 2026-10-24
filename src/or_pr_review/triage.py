@@ -8,10 +8,11 @@ generated/vendored/lock-class (via ``.gitattributes`` ``linguist-generated``
 / ``linguist-vendored``, built-in path heuristics, and an optional
 caller-owned glob input following the ``path_profiles`` trust model —
 workflow configuration only, never PR content), and packs hand-written
-hunks into the budget first. A demoted file keeps a visible STUB in the
-embedded diff — its ``diff --git`` header, add/delete counts, and first
-hunk header — plus an explicit note that the file is tool-readable and
-still requires a coverage entry, so the per-file coverage contract keeps
+hunks into the budget first; whole-file deletions demote alongside
+generated files. A demoted file keeps a visible STUB in the embedded diff —
+its ``diff --git`` header, add/delete counts, and first hunk header — plus
+an explicit note that the file is tool-readable (or, for a deletion, absent
+from the checkout) and still requires a coverage entry, so the per-file coverage contract keeps
 covering every changed file.
 
 Only when files must be dropped entirely (no segment and no stub embedded)
@@ -26,6 +27,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, field
+from itertools import takewhile
 
 from or_pr_review.errors import ActionError
 
@@ -76,6 +78,7 @@ _VENDORED_SEGMENTS = frozenset({"node_modules", "vendor", "third_party"})
 # Stub classification reasons; also rendered into the stub lines.
 REASON_GENERATED = "generated/vendored/lock-class"
 REASON_OVER_BUDGET = "hand-written, demoted to fit the embed budget"
+REASON_DELETED = "whole-file deletion"
 
 # Reserved bytes for the trailing omitted-files marker when files must be
 # dropped entirely.
@@ -362,13 +365,15 @@ class DiffSegment:
     @property
     def is_deleted(self) -> bool:
         """Whether the reviewed-head checkout cannot supply this file."""
+        # Extended headers only: an added hunk line `++ /dev/null` reads as `+++ /dev/null`.
+        header = list(takewhile(lambda line: not line.startswith("@@"), self.lines))
         return (
             self.new_path in {"/dev/null", "dev/null"}
-            or any(line == "+++ /dev/null" for line in self.lines)
-            or any(line.startswith("deleted file mode ") for line in self.lines)
+            or "+++ /dev/null" in header
+            or any(line.startswith("deleted file mode ") for line in header)
             or any(
                 line.startswith("Binary files ") and line.endswith(" and /dev/null differ")
-                for line in self.lines
+                for line in header
             )
         )
 
@@ -485,14 +490,21 @@ def build_stub(segment: DiffSegment, reason: str) -> str:
     adds, dels = segment.counts()
     hunks = segment.hunk_headers()
     first_hunk = hunks[0][:120] if hunks else "(no hunk header)"
+    second_line = (
+        "[This file was deleted in this PR and its removed lines are not embedded; "
+        "it is absent from the checkout, so only the counts above describe it. "
+        "It STILL REQUIRES a coverage entry.]\n"
+        if reason == REASON_DELETED
+        else "[This file changed in this PR but its hunks are not embedded. Its "
+        "current content is in the checkout — sweep it with read_file/grep "
+        "(deleted lines exist only as the counts above); it STILL REQUIRES "
+        "a coverage entry.]\n"
+    )
     return (
         f"{segment.header_line}\n"
         f"[diff stubbed by budget triage: {reason}; +{adds}/-{dels} across "
         f"{len(hunks)} hunk(s); first hunk: {first_hunk}]\n"
-        "[This file changed in this PR but its hunks are not embedded. Its "
-        "current content is in the checkout — sweep it with read_file/grep "
-        "(deleted lines exist only as the counts above); it STILL REQUIRES "
-        "a coverage entry.]\n"
+        f"{second_line}"
     )
 
 
@@ -512,9 +524,9 @@ def plan_packing(
 ) -> PackedDiff | None:
     """Deterministically pack an over-budget diff into `limit` bytes.
 
-    Generated-class files are demoted to stubs first (unless the stub would
-    be larger than the hunks themselves). If the total still exceeds the
-    budget, the largest remaining hand-written segment is demoted next, and
+    Generated-class files and whole-file deletions are demoted to stubs
+    first (unless the stub would be larger than the hunks themselves). If the
+    total still exceeds the budget, the largest remaining hand-written segment is demoted next, and
     so on — maximizing how many files keep their hunks embedded. Only when
     even the all-stubs form exceeds the budget are files dropped entirely
     (first-fit keeps what fits; the caller must surface drops as partial).
@@ -529,7 +541,7 @@ def plan_packing(
     seg_bytes = [segment.byte_len for segment in segments]
     stub_bytes = {
         reason: [len(build_stub(s, reason).encode("utf-8")) for s in segments]
-        for reason in (REASON_GENERATED, REASON_OVER_BUDGET)
+        for reason in (REASON_GENERATED, REASON_OVER_BUDGET, REASON_DELETED)
     }
     stubbed: list[str | None] = []  # reason, or None = embed
     for index, segment in enumerate(segments):
@@ -540,11 +552,9 @@ def plan_packing(
             caller_regexes=caller_regexes,
         )
         # A stub bigger than the hunks it replaces is pure loss.
-        if (
-            generated
-            and not segment.is_deleted
-            and stub_bytes[REASON_GENERATED][index] < seg_bytes[index]
-        ):
+        if segment.is_deleted and stub_bytes[REASON_DELETED][index] < seg_bytes[index]:
+            stubbed.append(REASON_DELETED)
+        elif generated and stub_bytes[REASON_GENERATED][index] < seg_bytes[index]:
             stubbed.append(REASON_GENERATED)
         else:
             stubbed.append(None)
@@ -560,11 +570,7 @@ def plan_packing(
         candidates = [
             (seg_bytes[i], i)
             for i in range(len(segments))
-            if (
-                stubbed[i] is None
-                and not segments[i].is_deleted
-                and seg_bytes[i] > stub_bytes[REASON_OVER_BUDGET][i]
-            )
+            if stubbed[i] is None and seg_bytes[i] > stub_bytes[REASON_OVER_BUDGET][i]
         ]
         if not candidates:
             break
