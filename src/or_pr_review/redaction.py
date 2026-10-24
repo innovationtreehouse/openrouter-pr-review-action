@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 
@@ -85,6 +86,36 @@ def redact(text: str, extra: list[str] | None = None) -> str:
     out = _BEARER_RE.sub(r"\1[redacted]", out)
     out = _KEY_ASSIGN_RE.sub(_redact_assignment, out)
     return out
+
+
+_SCRUB_RES = (
+    re.compile(r"(?i)[\"']?user_id[\"']?\s*[:=]\s*(?:\"[^\"]*\"|'[^']*'|[^\s,}\]]+)"),
+    re.compile(r"(?i)\bauthorization\b[\"']?\s*[:=]?\s*(?:bearer\s+)?[^\s,}\]]*"),
+    re.compile(r"(?i)\bbearer\s+[^\s\"',}\]]+"),
+    re.compile(r"\bsk-or-[A-Za-z0-9_.-]*"),
+    re.compile(r"(?i)[\"']?x-ratelimit-[\w-]+[\"']?\s*[:=]\s*(?:\"[^\"]*\"|[^\s,}\]]+)"),
+)
+ERROR_BODY_LIMIT = 200
+
+
+def scrub_error_body(body: str, status: int | None = None) -> str:
+    """Reduce a provider error body to a message safe for a public comment."""
+    try:
+        err = json.loads(body).get("error")
+        msg = err.get("message") if isinstance(err, dict) else None
+        if isinstance(msg, str) and msg.strip():
+            code = err.get("code")
+            text = msg.strip() + (f" (code {code})" if code not in (None, "", status) else "")
+            return redact(_scrub(text))
+    except (ValueError, AttributeError):
+        pass
+    return redact(_scrub(body[:ERROR_BODY_LIMIT]))
+
+
+def _scrub(text: str) -> str:
+    for rx in _SCRUB_RES:
+        text = rx.sub("[redacted]", text)
+    return text
 
 
 def looks_like_dotenv(text: str) -> bool:

@@ -27,7 +27,7 @@ from or_pr_review.http_transport import (
     bounded_urlopen,
 )
 from or_pr_review.models import GEMINI_MAX_RESPONSE_TOKENS, base_chat_payload
-from or_pr_review.redaction import redact
+from or_pr_review.redaction import redact, scrub_error_body
 from or_pr_review.schema import (
     SCHEMA_VERSION,
     Finding,
@@ -285,7 +285,6 @@ def openrouter_chat(
             if stats is not None:
                 stats["last_http_status"] = exc.code
             full_error_body = exc.read().decode("utf-8", errors="replace")
-            err_body = full_error_body[:800]
             provider = _provider_from_error_body(full_error_body)
             max_attempts = MAX_RATE_LIMIT_ATTEMPTS if exc.code == 429 else MAX_HTTP_ATTEMPTS
             if exc.code in RETRYABLE_STATUS and attempt < max_attempts:
@@ -301,7 +300,7 @@ def openrouter_chat(
                     _sleep_before_retry(delay, sleep=sleep, deadline=deadline)
                 except LaneError as deadline_error:
                     raise OpenRouterHTTPError(
-                        f"{deadline_error}; last OpenRouter HTTP {exc.code}: {redact(err_body)}",
+                        f"{deadline_error}; last OpenRouter HTTP {exc.code}: {scrub_error_body(full_error_body, exc.code)}",
                         provider=provider,
                         status=exc.code,
                     ) from exc
@@ -310,7 +309,7 @@ def openrouter_chat(
             # error response non-billable. Any earlier successful requests in
             # the lane retain their separately reported cost.
             raise OpenRouterHTTPError(
-                f"OpenRouter HTTP {exc.code}: {redact(err_body)}",
+                f"OpenRouter HTTP {exc.code}: {scrub_error_body(full_error_body, exc.code)}",
                 provider=provider,
                 status=exc.code,
             ) from exc
@@ -1123,7 +1122,7 @@ def _shrink_tool_history(
 def _assistant_message(response: dict[str, Any]) -> dict[str, Any]:
     error = response.get("error")
     if isinstance(error, dict):
-        raise LaneError(redact(str(error.get("message") or error)))
+        raise LaneError(scrub_error_body(json.dumps({"error": error})))
     choices = response.get("choices")
     if not isinstance(choices, list) or not choices:
         raise LaneError("OpenRouter response has no choices")
