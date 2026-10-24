@@ -8,12 +8,18 @@ import pytest
 
 from or_pr_review import router as rt
 from or_pr_review import router_github as rg
+from or_pr_review.brief import BriefItem, ReviewBrief
 
 BOT = rt.BOT
 
 
+def model_down(chunk):
+    raise RuntimeError("compaction model down")
+
+
 @pytest.fixture(autouse=True)
-def defaults():
+def defaults(monkeypatch):
+    monkeypatch.setattr(rt, "compaction_brief", lambda costs: model_down)
     rt.configure()
     yield
     rt.configure()
@@ -78,6 +84,13 @@ def test_config_rejects_typos_and_broken_ladders(tmp_path):
         {"approve": "off\nmodel=x"},
         {"rungs": [dict(r, bar=None) for r in rt.DEFAULTS["rungs"]]},
         {"rungs": [{k: v for k, v in r.items() if k != "bar"} for r in rt.DEFAULTS["rungs"]]},
+        {"rungs": ["free"]},
+        {"rungs": [dict(r, max_tool_turns=2.5) for r in rt.DEFAULTS["rungs"]]},
+        {"rungs": [rt.DEFAULTS["rungs"][i] for i in (0, 2, 1, 3)]},  # mid after high
+        {"rungs": [rt.DEFAULTS["rungs"][i] for i in (0, 1, 2, 2, 3)]},  # duplicate high
+        {"decision_state_max": 20000.5},
+        {"decision_state_max": 4000},
+        {"trusted_associations": ["MEMBER", 5]},
     ]
     for cfg in bad:
         path.write_text(json.dumps(cfg))
@@ -687,3 +700,50 @@ def test_outsiders_neither_settle_questions_nor_reach_the_answer_model(monkeypat
         monkeypatch.setenv(k, v)
     rg.answer()
     assert seen and "ann: why?" in seen[0] and "eve" not in seen[0]
+
+
+def test_a_tier_request_in_long_trusted_text_is_never_condensed():
+    # xr13 probe p5: the request sat past the 280-char condensed cut of a 3,813-char body.
+    body = "Background on the migration and its risks. " * 88 + "Please use high for this one."
+    raw = raw_state(files=1, lines=3, human=[body] + ["Discussion. " * 300] * 19)
+    human = rt.decision_state(raw)["lanes"]["trusted_human_text"]["findings"]
+    assert human[0]["evidence"] == body and human[0]["verbatim"]
+    assert human[0]["title"] == "trusted author text (data)"
+    assert any("[condensed from" in h["evidence"] for h in human[1:])
+
+
+def test_condensed_trusted_text_is_map_reduced_when_a_model_is_set():
+    def brief(chunk):
+        return ReviewBrief(intent="discusses the rollout", claims=[BriefItem("x", "rollout")])
+
+    body = "Please use high for this one. " + "Context. " * 400
+    raw = raw_state(files=1, lines=3, human=[body] + ["Discussion. " * 300] * 19)
+    human = rt.decision_state(raw, brief_fn=brief)["lanes"]["trusted_human_text"]["findings"]
+    assert human[0]["evidence"] == body
+    assert all("discusses the rollout" in h["evidence"] for h in human[1:])
+    assert not any("[condensed from" in h["evidence"] for h in human)
+
+
+def test_the_state_floor_leaves_room_for_ordinary_input(tmp_path):
+    # xr13 probe p7: at a 4000-byte cap, 12 trusted ~560-char comments wiped the title.
+    path = tmp_path / "router.json"
+    path.write_text(json.dumps({"decision_state_max": 16000}))
+    rt.configure(str(path))
+    raw = raw_state(files=1, lines=1, human=["Long comment. " * 40] * 12)
+    state = rt.decision_state(dict(raw, untrusted_pr_title="Important title"))
+    assert not state["compaction"]["terminal"] and state["pr"]["title"] == "Important title"
+
+
+def test_round_and_current_fold_counts_share_one_item():
+    cur = "".join(hunky(f"src/m{i}/f.py", 40) for i in range(30))
+    raw = {
+        "untrusted_pr_title": "t",
+        "changed_files": [],
+        "changed_lines": 10,
+        "file_count": 30,
+        "untrusted_diff": cur,
+        "untrusted_prior_review_rounds": many_hunk_round("package-lock.json", 900)
+        + [dict(many_hunk_round("lib/x.py", 400)[0], round=2)],
+    }
+    counts = rt.decision_state(raw)["change"]["uncited_files_by_top_dir"]
+    assert {"round_1", "round_2", "src"} <= set(counts)

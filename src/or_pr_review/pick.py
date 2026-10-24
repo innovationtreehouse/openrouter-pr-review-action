@@ -500,12 +500,14 @@ def _summarized(item: Item, target: int, brief_fn: BriefFn, calls: list[int]) ->
 
 def _group_uncited_files(state: State, cited: dict[str, set[int]]) -> None:
     """Fold files no finding cites into per-top-directory counts, largest first."""
-    group = Item("change", "uncited_files_by_top_dir", {})
+    key = "uncited_files_by_top_dir"  # a second call adds to the first call's counts
+    group = next((i for i in state.items if i.section == "change" and i.key == key), None)
+    group = group or Item("change", key, {})
     uncited = [i for i in state.in_sections("files") if i.key not in cited]
     for item in uncited:
         if state.fits():
             break
-        if not group.value:
+        if not any(i is group for i in state.items):
             state.items.append(group)
         top = item.key.split("/", 1)[0] if "/" in item.key else "."
         counts = group.value.setdefault(top, {"files": 0, "additions": 0, "deletions": 0})
@@ -534,7 +536,7 @@ def _condense_evidence(state: State) -> None:
             return
         finding = item.value["findings"][n]
         text = finding["evidence"]
-        if len(text) <= CONDENSED_EVIDENCE_CHARS:
+        if len(text) <= CONDENSED_EVIDENCE_CHARS or finding.get("verbatim"):
             continue
         cut = text[:CONDENSED_EVIDENCE_CHARS].rsplit(". ", 1)[0].rstrip(".") + "."
         findings = list(item.value["findings"])

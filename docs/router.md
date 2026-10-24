@@ -38,8 +38,8 @@ Every key is optional. An unknown key, a value of the wrong type (`"false"` is n
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `decision_model` | `baseten/mammoth-1:free` | Router, judge and pick-mode decision model |
-| `decision_state_max` | `48000` | Decision-state cap in bytes; the token cap is a quarter of it. Jev 1.14 takes `1500000` |
-| `compaction_model` | `nvidia/nemotron-3.5-super-vl:free` | The action's `compaction_model` (re-review brief). `""` disables it. The router's own state fitting never calls a model |
+| `decision_state_max` | `48000` | Decision-state cap in bytes, at least 16000; the token cap is a quarter of it. Jev 1.14 takes `1500000` |
+| `compaction_model` | `nvidia/nemotron-3.5-super-vl:free` | The action's `compaction_model` (re-review brief), and the router's summarizer for trusted PR text the deterministic fit had to condense. `""` disables both |
 | `judge_mode` | `pick` | Action `judge_mode` for multi-lane rungs |
 | `approve` | `off` | Action `approve` input |
 | `first_round_lowest` | `true` | A PR's first review uses the lowest rung unless the fixed ladder says `high` or trusted PR text asks for a tier |
@@ -99,14 +99,18 @@ whitespace change asking for `top`). It also lifts `first_round_lowest` for that
 Route and adjudicate send the decision model the PR title, the per-file diff, every earlier AI
 review round (body, inline comments and, under `files` as `round_N/<path>`, the diff it covered),
 trusted PR text and, for adjudicate, the posted review. Nothing is cut. Under `decision_state_max`
-the state goes unchanged. Over it, earlier rounds' diffs fold first into per-round, per-directory
-counts (largest first, until the state fits), as the old router dropped them first. Then pick
-mode's tiered compactor (`pick.fit_state`) runs, largest items first, stopping as soon as the state
-fits: strip HTML comments, drop duplicates, collapse unchanged diff context, reduce diffs to file
-and hunk headers, fold the remaining files into per-directory counts, digest earlier rounds to one
-line each, condense trusted PR text and the posted review (they sit in `lanes`, which goes last),
-and finally one line per section. The state header records every step. No step calls a model, so
-the fitting is deterministic and works at any input size.
+the state goes unchanged. Over it, earlier rounds' diffs fold first into per-round counts
+(largest first, until the state fits), as the old router dropped them first. Then pick mode's
+tiered compactor (`pick.fit_state`) runs, largest items first, stopping as soon as the state fits:
+strip HTML comments, drop duplicates, collapse unchanged diff context, reduce diffs to file and
+hunk headers, fold the remaining files into per-directory counts, digest earlier rounds to one line
+each, condense trusted PR text and the posted review (they sit in `lanes`, which goes last), and
+finally one line per section. The state header records every step. This fit calls no model, so it
+works at any input size.
+
+The newest trusted text that asks for a tier is never condensed. If other trusted text had to be
+condensed (cut to its first 280 characters), the router refits with each such text map-reduced by
+`compaction_model` to its share of the cap instead; if the model fails, the condensed state stands.
 
 ## Running the router by hand
 
