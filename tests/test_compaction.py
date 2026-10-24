@@ -286,8 +286,12 @@ def test_reply_outcome_is_conservative():
 def test_outcome_lines_survive_when_verbatim_text_is_evicted():
     late = "Long explanation. " + "q" * 400 + " Fixed in c6e3169."  # sha past the settled clip
     replies = [(f"old/r1-{n}", "dev", "Disputed. " + "s" * 1_900) for n in range(30)]
-    replies += [("old/r9-9", "dev", late), ("g/r1-1", "dev", "Fixed in abc1234."),
-                ("g/r1-1", "dev", "Thanks!"), ("g/r1-2", "owner", "Deferred to #12. " + "d" * 1_900)]
+    replies += [
+        ("old/r9-9", "dev", late),
+        ("g/r1-1", "dev", "Fixed in abc1234."),
+        ("g/r1-1", "dev", "Thanks!"),
+        ("g/r1-2", "owner", "Deferred to #12. " + "d" * 1_900),
+    ]
     comments = [(f"u{n}", f"comment{n} " + "c" * 1_900) for n in range(30)]
     result = compact(budget=8_000, replies=replies, comments=comments, carried_ids={"g/r1-2"})
     text = result.text

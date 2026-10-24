@@ -46,9 +46,9 @@ from or_pr_review.judge import (
     run_llm_judge,
 )
 from or_pr_review.loop import (
-    MAX_UNCOMPACTED_HISTORY_BYTES,
     MAX_REBASE_CONTEXT_BYTES,
     MAX_REPLIES_BYTES,
+    MAX_UNCOMPACTED_HISTORY_BYTES,
     Ledger,
     LoopState,
     apply_round,

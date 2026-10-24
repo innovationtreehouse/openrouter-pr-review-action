@@ -11,7 +11,6 @@ import pytest
 
 from or_pr_review.errors import ActionError, LaneError
 from or_pr_review.harness import (
-    OpenRouterHTTPError,
     BLAST_RADIUS_NUDGE,
     BUDGET_EXHAUSTED_NOTICE,
     DEADLINE_FINALIZE_NOTICE,
@@ -19,6 +18,7 @@ from or_pr_review.harness import (
     MAX_GEMINI_RESPONSE_TOKENS,
     MAX_TOOL_TURNS,
     MISSING_SIGNATURE_FINALIZE_NOTICE,
+    OpenRouterHTTPError,
     _assistant_record,
     _LaneClock,
     _LoopPhase,

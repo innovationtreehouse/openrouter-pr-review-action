@@ -300,7 +300,8 @@ def openrouter_chat(
                     _sleep_before_retry(delay, sleep=sleep, deadline=deadline)
                 except LaneError as deadline_error:
                     raise OpenRouterHTTPError(
-                        f"{deadline_error}; last OpenRouter HTTP {exc.code}: {scrub_error_body(full_error_body, exc.code)}",
+                        f"{deadline_error}; last OpenRouter HTTP {exc.code}: "
+                        f"{scrub_error_body(full_error_body, exc.code)}",
                         provider=provider,
                         status=exc.code,
                     ) from exc

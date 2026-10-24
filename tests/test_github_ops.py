@@ -357,7 +357,9 @@ def test_create_review_keeps_event_on_inline_fallback() -> None:
 
     gh = GitHub(token="t", repository="o/r", runner=runner)
     gh.create_review(
-        1, "body", "c" * 40,
+        1,
+        "body",
+        "c" * 40,
         comments=[{"path": "a.py", "line": 1, "side": "RIGHT", "body": "x"}],
         event="APPROVE",
     )
