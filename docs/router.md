@@ -110,7 +110,11 @@ works at any input size.
 
 The newest trusted text that asks for a tier is never condensed. If other trusted text had to be
 condensed (cut to its first 280 characters), the router refits with each such text map-reduced by
-`compaction_model` to its share of the cap instead; if the model fails, the condensed state stands.
+`compaction_model` to its share of the cap instead. Likewise, if the posted review was condensed or
+the fit reached its terminal step, the review becomes at most 8 findings (the body, then groups of
+inline comments), each map-reduced to 1/16 of the cap with every comment id and location kept
+beside it. If the model fails, the deterministic state stands. If even the comment ids and
+locations overflow, the comments are grouped first, verbatim.
 
 ## Running the router by hand
 

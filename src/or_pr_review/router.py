@@ -486,7 +486,7 @@ def state_items(raw):
         items.append(fit.Item("lanes", "trusted_human_text", {"findings": found}))
     if "untrusted_review_body" in raw:
         found = [evidence("body", "review body", raw["untrusted_review_body"])]
-        found += [
+        found = raw.get("untrusted_review_findings") or found + [
             evidence(f"c{n}", "inline comment", c["body"], f"{c['path']}:{c['line']}")
             for n, c in enumerate(raw.get("untrusted_review_comments") or [], 1)
         ]
@@ -524,39 +524,92 @@ def _fitted(raw, hints, cap):
     return {**state.render(), **hints}
 
 
+REVIEW_GROUPS = 8  # posted-review summary: the body plus up to 7 groups of inline comments
+
+
+def summarize_review(raw, target, brief_fn, calls):
+    """The posted review as at most REVIEW_GROUPS findings, each map-reduced to `target` bytes
+    (verbatim without a brief_fn), keeping every id and location beside its group's text."""
+    items = [("body", "", raw["untrusted_review_body"])] + [
+        (f"c{n}", f"{c['path']}:{c['line']}", c["body"])
+        for n, c in enumerate(raw.get("untrusted_review_comments") or [], 1)
+    ]
+    size = max(1, -(-(len(items) - 1) // (REVIEW_GROUPS - 1)))
+    groups = [items[:1]] + [items[i : i + size] for i in range(1, len(items), size)]
+    found = []
+    for g in groups:
+        text = "\n\n".join(f"[{i} {loc}] {e}" if loc else f"[{i}] {e}" for i, loc, e in g)
+        found.append(
+            {
+                "id": g[0][0] if len(g) == 1 else f"{g[0][0]}..{g[-1][0]}",
+                "title": "review body" if g[0][0] == "body" else "inline comments (summarized)",
+                "location": ", ".join(loc for _, loc, _ in g if loc),
+                "evidence": fit.map_reduce(text, target, brief_fn, calls) if brief_fn else text,
+            }
+        )
+    return dict(raw, untrusted_review_findings=found)
+
+
+def _summarized(what, state, rebuild):
+    try:
+        return rebuild()
+    except Exception as e:
+        print(f"::warning::{what} summary failed ({e}); keeping the current state", file=sys.stderr)
+        return state
+
+
 def decision_state(raw, brief_fn=None):
     """The decision state, fitted deterministically by the package's pick compactor: unchanged
     under the cap, else the fewest, largest items compacted tier by tier. The newest trusted
-    text asking for a tier is never condensed; other trusted text cut to its 280-char condensed
-    form is map-reduced by compaction_model instead, keeping the cut state on any failure."""
+    text asking for a tier is never condensed. Where the fit had to condense trusted text or the
+    posted review (or reached its terminal step), compaction_model map-reduces them instead,
+    keeping the deterministic state on any failure."""
     hints = {
         k: v for k, v in raw.items() if not k.startswith("untrusted_") and k != "changed_files"
     }
     cap = int(C["decision_state_max"]) - len(json.dumps(hints).encode()) - HINT_ROOM
-    state = _fitted(raw, hints, cap)
-    texts = raw.get("untrusted_human_text") or []
-    human = state.get("lanes", {}).get("trusted_human_text", {}).get("findings", [])
-    if not any("[condensed from" in h.get("evidence", "") for h in human):
-        return state
+    try:
+        state = _fitted(raw, hints, cap)
+    except fit.PickError:
+        if "untrusted_review_body" not in raw:
+            raise
+        # Per-comment ids and locations alone overflow: group the comments, still verbatim.
+        state = _fitted(summarize_review(raw, 0, None, None), hints, cap)
     if not (brief_fn or C["compaction_model"]):
         return state
-    try:
-        target, calls = cap // (8 * len(texts)), [0]
-        brief_fn = brief_fn or compaction_brief([])
-        texts = [
-            t
-            if len(t.encode()) <= target or h.get("verbatim")
-            else fit.map_reduce(t, target, brief_fn, calls)
-            for t, h in zip(texts, human, strict=True)
-        ]
-        print(f"decision state: {calls[0]} compaction call(s) for trusted text")
-        return _fitted(dict(raw, untrusted_human_text=texts), hints, cap)
-    except Exception as e:
-        print(
-            f"::warning::trusted-text summary failed ({e}); using the condensed state",
-            file=sys.stderr,
-        )
-        return state
+    brief_fn, calls = brief_fn or compaction_brief([]), [0]
+    texts = raw.get("untrusted_human_text") or []
+    human = state.get("lanes", {}).get("trusted_human_text", {}).get("findings", [])
+    if any("[condensed from" in h.get("evidence", "") for h in human):
+        target = cap // (8 * len(texts))
+
+        def rebuild_text():
+            short = [
+                t
+                if len(t.encode()) <= target or h.get("verbatim")
+                else fit.map_reduce(t, target, brief_fn, calls)
+                for t, h in zip(texts, human, strict=True)
+            ]
+            raw.update(untrusted_human_text=short)
+            return _fitted(raw, hints, cap)
+
+        raw = dict(raw)
+        state = _summarized("trusted-text", state, rebuild_text)
+    review = state.get("lanes", {}).get("posted_review", {}).get("findings", [])
+    cut = state["compaction"]["terminal"] or any(
+        "[condensed from" in f.get("evidence", "") for f in review
+    )
+    if cut and "untrusted_review_body" in raw:
+        target, before = cap // (2 * REVIEW_GROUPS), calls[0]
+
+        def rebuild_review():
+            grouped = summarize_review(raw, target, brief_fn, calls)
+            return state if calls[0] == before else _fitted(grouped, hints, cap)
+
+        state = _summarized("posted-review", state, rebuild_review)
+    if calls[0]:
+        print(f"decision state: {calls[0]} compaction call(s)")
+    return state
 
 
 def pick(probs, rungs):

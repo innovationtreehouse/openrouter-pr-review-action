@@ -747,3 +747,46 @@ def test_round_and_current_fold_counts_share_one_item():
     }
     counts = rt.decision_state(raw)["change"]["uncited_files_by_top_dir"]
     assert {"round_1", "round_2", "src"} <= set(counts)
+
+
+def big_review_state(comments):
+    # xr13 probe p3: condensed inline comments alone exceed the 48 KB cap.
+    raw = raw_state(files=30, lines=40, rounds=2)
+    comments = [
+        {"path": f"src/f{i % 30}.py", "line": i, "body": "Finding. " * 80} for i in range(comments)
+    ]
+    return dict(
+        raw,
+        reviewer_model="m",
+        untrusted_review_body="**Verdict:** x\n" + "Checked. " * 2000,
+        untrusted_review_comments=comments,
+    )
+
+
+def test_an_oversized_posted_review_is_map_reduced_not_dropped():
+    calls = []
+
+    def brief(chunk):
+        calls.append(len(chunk))
+        return ReviewBrief(intent="flags unchecked input", claims=[BriefItem("x", "Finding.")])
+
+    for n in (170, 1700):  # p3 and 10x p3
+        calls.clear()
+        state = rt.decision_state(big_review_state(n), brief_fn=brief)
+        found = state["lanes"]["posted_review"]["findings"]
+        assert (
+            calls and size(state) <= rt.C["decision_state_max"] and len(found) == rt.REVIEW_GROUPS
+        )
+        assert found[1]["id"].startswith("c1..") and found[1]["location"].startswith("src/f0.py:0")
+        assert all("flags unchecked input" in f.get("evidence", "") for f in found) or n == 1700
+    assert not rt.decision_state(big_review_state(170), brief_fn=brief)["compaction"]["terminal"]
+
+
+def test_a_failed_review_summary_keeps_the_deterministic_state():
+    raw = big_review_state(170)
+    state = rt.decision_state(raw, brief_fn=model_down)
+    assert state == rt.decision_state(raw) and state["compaction"]["terminal"]
+    assert len(state["lanes"]["posted_review"]["findings"]) == 171
+    huge = rt.decision_state(big_review_state(1700), brief_fn=model_down)  # ids alone overflow
+    assert size(huge) <= rt.C["decision_state_max"]
+    assert len(huge["lanes"]["posted_review"]["findings"]) == rt.REVIEW_GROUPS

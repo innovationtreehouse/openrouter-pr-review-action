@@ -502,13 +502,14 @@ def _group_uncited_files(state: State, cited: dict[str, set[int]]) -> None:
     """Fold files no finding cites into per-top-directory counts, largest first."""
     key = "uncited_files_by_top_dir"  # a second call adds to the first call's counts
     group = next((i for i in state.items if i.section == "change" and i.key == key), None)
-    group = group or Item("change", key, {})
+    added, group = group is not None, group or Item("change", key, {})
     uncited = [i for i in state.in_sections("files") if i.key not in cited]
     for item in uncited:
         if state.fits():
             break
-        if not any(i is group for i in state.items):
+        if not added:
             state.items.append(group)
+            added = True
         top = item.key.split("/", 1)[0] if "/" in item.key else "."
         counts = group.value.setdefault(top, {"files": 0, "additions": 0, "deletions": 0})
         counts["files"] += 1
