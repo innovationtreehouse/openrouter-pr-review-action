@@ -16,7 +16,8 @@ from functools import partial
 from pathlib import Path
 from typing import Any
 
-from or_pr_review.brief import BriefSession
+from or_pr_review import pick
+from or_pr_review.brief import BriefSession, build_brief
 from or_pr_review.collect import (
     DEFAULT_MAX_DIFF_KB,
     DIVERGED_NOTICE,
@@ -141,6 +142,8 @@ class JudgeOutcome:
     cost: float | None
     ran: bool
     environment_diagnostics: list[tuple[str, str]]
+    # Pick mode: the one lane posted as-is (its resolutions and notices only).
+    picked: LaneResult | None = None
 
     def __iter__(self):
         """Compatibility for callers that previously unpacked the 4-tuple."""
@@ -353,6 +356,8 @@ def _validate_inputs(env: dict[str, str], *, full_roster: bool = False) -> list[
     _env_flag(env, "JUDGE_NEEDED", judge_is_needed(slugs))
     _env_flag(env, "STATUS_COMMENTS", True)
     parse_judge_model(env.get("JUDGE_MODEL"))
+    if _judge_mode(env) == "pick":
+        _decision_settings(env)
     parse_scope(env.get("REVIEW_SCOPE") or "full-pr")
     parse_mode(env.get("REVIEW_MODE") or "auto")
     fail_on = (env.get("FAIL_ON") or "never").strip().lower()
@@ -661,6 +666,8 @@ def _resolve_issues(
     slugs: list[str],
     lanes: list[LaneResult],
     successful: list[LaneResult],
+    collected: CollectedReview | None = None,
+    loop: LoopState | None = None,
 ) -> JudgeOutcome:
     lane_payloads = [lane.to_dict() for lane in successful]
     if not successful:
@@ -696,6 +703,8 @@ def _resolve_issues(
         return JudgeOutcome(
             [], "skipped (review environment unavailable)", None, False, diagnostics
         )
+    if _judge_mode(env) == "pick":
+        return _resolve_pick(env, successful, lane_payloads, diagnostics, collected, loop)
     judge_timeout = _judge_request_timeout(env)
     if judge_timeout is None:
         print(
@@ -786,6 +795,147 @@ def _resolve_issues(
         True,
         diagnostics,
     )
+
+
+def _judge_mode(env: dict[str, str]) -> str:
+    mode = (env.get("JUDGE_MODE") or "merge").strip().lower()
+    if mode not in {"merge", "pick"}:
+        raise ActionError("judge_mode must be 'merge' or 'pick'")
+    return mode
+
+
+def _decision_settings(env: dict[str, str]) -> tuple[str, str, int]:
+    raw = (env.get("DECISION_MODEL") or "").strip() or pick.DEFAULT_DECISION_MODEL
+    model = parse_slug(raw, what="decision_model")
+    endpoint = (env.get("DECISION_ENDPOINT") or "").strip() or pick.DEFAULT_DECISION_ENDPOINT
+    if not endpoint.replace("-", "").replace("_", "").isalnum() or not endpoint.isascii():
+        raise ActionError("decision_endpoint must be an OpenRouter API path segment")
+    cap = _int_env(env, "DECISION_STATE_MAX", pick.DEFAULT_STATE_MAX)
+    if cap < 4_000:
+        raise ActionError("decision_state_max must be at least 4000 bytes")
+    return model, endpoint, cap
+
+
+def _resolve_pick(
+    env: dict[str, str],
+    successful: list[LaneResult],
+    lane_payloads: list[dict[str, Any]],
+    diagnostics: list[tuple[str, str]],
+    collected: CollectedReview | None,
+    loop: LoopState | None,
+) -> JudgeOutcome:
+    """The decision model picks one lane to post; any failure posts the labeled union."""
+    model, endpoint, cap = _decision_settings(env)
+
+    def fallback(stage: str, reason: str) -> JudgeOutcome:
+        print(f"warning: pick {stage} failed ({redact(reason)}); using the deterministic union")
+        issues, note = _capped_union_note(
+            lane_payloads, f"`{model}` (pick {stage} fallback: deterministic union)"
+        )
+        return JudgeOutcome(issues, note, None, stage != "deadline", diagnostics)
+
+    timeout = _judge_request_timeout(env)
+    if timeout is None:
+        return fallback("deadline", "too little job time left for a decision call")
+    if collected is None:
+        return fallback("state", "no collected review context")
+    deadline = _judge_deadline(env, timeout)
+    ids = pick.lane_ids(successful)
+    try:
+        key = require_openrouter_key(env)
+        state = pick.State(_pick_items(env, collected, loop, successful), cap)
+        calls = pick.fit_state(state, successful, _compaction_brief_fn(env, key, deadline))
+        print(
+            f"pick state: {state.bytes_before} -> {state.total()} bytes (cap {cap}, "
+            f"{calls} compaction call(s)); applied {state.header()['applied']}"
+        )
+    except Exception as exc:  # noqa: BLE001 - every state failure falls back
+        return fallback("compaction", str(exc))
+    print(f"pick running with `{model}` on `{endpoint}` (timeout={timeout}s)", flush=True)
+    try:
+        response = pick.ask(
+            model=model,
+            endpoint=endpoint,
+            api_key=key,
+            state=state.render(),
+            qs=pick.questions(ids, successful),
+            timeout=timeout,
+            deadline=deadline,
+        )
+        chosen, p, safe = pick.parse_pick(response, ids)
+    except Exception as exc:  # noqa: BLE001 - transport or answer failure falls back
+        return fallback("decision", str(exc))
+    lane = successful[ids.index(chosen)]
+    print(f"pick: {chosen} ({lane.model}) p={p} safe={safe}")
+    return JudgeOutcome(
+        issues_from_single_lane(lane),
+        pick.pick_note(model, ids, chosen, successful, p, safe, state),
+        pick.response_cost(response, model),
+        True,
+        partition_reviewable_lanes([lane.to_dict()])[1],
+        picked=lane,
+    )
+
+
+def _pick_items(
+    env: dict[str, str],
+    collected: CollectedReview,
+    loop: LoopState | None,
+    successful: list[LaneResult],
+) -> list[pick.Item]:
+    github, bot = _github(env), _bot_login(env)
+
+    def best_effort(what: str, read: Any) -> list[Any]:
+        try:
+            return read()
+        except ActionError as exc:
+            print(f"warning: pick state could not read {what}: {redact(str(exc))}")
+            return []
+
+    pr = collected.pr_number
+    generation = loop.generation if loop is not None else ""
+    policy = collected.review_policy
+    return pick.build_items(
+        collected=collected,
+        loop=loop,
+        lanes=successful,
+        review_bodies=best_effort("prior reviews", lambda: github.list_bot_review_bodies(pr, bot)),
+        replies=best_effort(
+            "finding replies", lambda: github.list_finding_replies(pr, generation=generation)
+        ),
+        comments=[
+            (login, body)
+            for login, body in best_effort(
+                "PR comments", lambda: github.list_recent_issue_comments(pr)
+            )
+            if not login.endswith("[bot]")
+        ],
+        setup={
+            "review_policy": f"{policy.profile}/{policy.minimum}" if policy else "",
+            "path_profiles": env.get("PATH_PROFILES") or "",
+            "custom_instructions": env.get("CUSTOM_INSTRUCTIONS") or "",
+        },
+    )
+
+
+def _compaction_brief_fn(env: dict[str, str], key: str, deadline: float | None) -> pick.BriefFn:
+    raw = "" if _compaction_mode(env) == "rules" else (env.get("COMPACTION_MODEL") or "").strip()
+    model = parse_slug(raw, what="compaction_model") if raw else ""
+    route = parse_model_routes(env.get("MODEL_ROUTES")).get(model, {}) if model else {}
+
+    def brief_fn(chunk: str) -> Any:
+        if not model:
+            raise pick.PickError("the state is over the cap and compaction_model is empty")
+        left = BRIEF_TIMEOUT_SECONDS if deadline is None else deadline - time.monotonic()
+        if left < 1:
+            raise pick.PickError("no time left for the compaction model")
+
+        def chat(payload: dict[str, Any]) -> dict[str, Any]:
+            return openrouter_chat(key, payload, timeout=max(1, int(left)), deadline=deadline)
+
+        return build_brief({"source": chunk}, model=model, chat=chat, route=route)
+
+    return brief_fn
 
 
 def _capped_union_note(lanes: list[dict[str, Any]], note: str) -> tuple[list[MergedIssue], str]:
@@ -1768,8 +1918,9 @@ def _finish(
         _judge_needed(env, slugs),
         plan.judge_model if plan is not None else parse_judge_model(env.get("JUDGE_MODEL")),
     )
-    judge_outcome = _resolve_issues(env, slugs, lanes, successful)
+    judge_outcome = _resolve_issues(env, slugs, lanes, successful, collected, loop)
     issues = judge_outcome.issues
+    posted_lanes = [judge_outcome.picked] if judge_outcome.picked else successful
     # Judge output bypasses the per-lane anchor gate, so gate the merged
     # issues too when a checkout demonstrably contains the reviewed head.
     # MergedIssue duck-types the
@@ -1780,7 +1931,7 @@ def _finish(
         issues = sanitize_anchors(issues, finish_root)  # type: ignore[arg-type]
 
     prior_ids = _expected_resolution_ids(loop, collected) or set()
-    resolutions = merge_resolutions([lane.resolutions for lane in successful], prior_ids)
+    resolutions = merge_resolutions([lane.resolutions for lane in posted_lanes], prior_ids)
     outcome = apply_round(
         loop, issues, resolutions, reassess_disputes=collected.plan.scope == "rebase"
     )
@@ -1816,7 +1967,7 @@ def _finish(
         )
     if loop.mode == "initial" or collected.plan.kind == "full-pr":
         diff_path_set = set(changed_paths_from_diff(collected.diff))
-        for lane in lanes:
+        for lane in posted_lanes:
             if lane.ok and lane.coverage:
                 for note in coverage_count_mismatches(lane.findings, lane.coverage, diff_path_set):
                     notices.append(f"`{lane.model}`: {note}")
@@ -1827,7 +1978,7 @@ def _finish(
     # so a tool-less run cannot honor it: stubs + max_tool_turns=0 stays a
     # partial review.
     truncation_partial = collected.truncation.forces_partial
-    for lane in successful:
+    for lane in posted_lanes:
         if lane.dropped_findings:
             truncation_partial = True
             notices.append(
@@ -1975,9 +2126,7 @@ def _finish(
     review_url = ""
     event = _review_event(env, verdict, outcome.open_issue_count)
     try:
-        posted = _post_review(
-            github, collected.pr_number, bodies[0], reviewed_sha, comments, event
-        )
+        posted = _post_review(github, collected.pr_number, bodies[0], reviewed_sha, comments, event)
         html = posted.get("html_url")
         review_url = html if isinstance(html, str) else ""
     except ActionError as exc:
