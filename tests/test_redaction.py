@@ -84,3 +84,40 @@ def test_short_literal_extra_is_not_globally_replaced() -> None:
 def test_looks_like_dotenv() -> None:
     assert looks_like_dotenv("FOO=1\nBAR=2\nBAZ=3\n")
     assert not looks_like_dotenv("just a paragraph of review text\nwith two lines")
+
+
+_BODY_429 = (
+    '{"error":{"message":"Rate limit exceeded: free-models-per-day-high-balance. ","code":429,'
+    '"metadata":{"headers":{"X-RateLimit-Limit":"50"},"limit_source":"x","provider_name":null}},'
+    '"user_id":"user_2abcDEF"}'
+)
+
+
+def test_scrub_error_body_json_keeps_only_message() -> None:
+    from or_pr_review.redaction import scrub_error_body
+
+    out = scrub_error_body(_BODY_429, 429)
+    assert f"HTTP 429: {out}" == "HTTP 429: Rate limit exceeded: free-models-per-day-high-balance."
+    assert "user_" not in out and "RateLimit" not in out
+    assert scrub_error_body('{"error":{"message":"bad","code":"x"}}', 400) == "bad (code x)"
+
+
+def test_scrub_error_body_non_json_truncated_and_scrubbed() -> None:
+    from or_pr_review.redaction import scrub_error_body
+
+    body = (
+        'upstream "user_id":"user_2abcDEF" Authorization: Bearer tok123 X-RateLimit-Limit: 50 '
+        + "x" * 500
+    )
+    out = scrub_error_body(body)
+    assert len(out) < 260
+    for leaked in ("user_2abcDEF", "tok123", ": 50"):
+        assert leaked not in out
+
+
+def test_scrub_error_body_never_emits_openrouter_key() -> None:
+    from or_pr_review.redaction import scrub_error_body
+
+    key = "sk-or-v1-abc123def456"
+    assert key not in scrub_error_body(f"invalid key {key}")
+    assert key not in scrub_error_body(f'{{"error":{{"message":"bad key {key}"}}}}')
