@@ -10,8 +10,8 @@ from or_pr_review.compaction import compact_history
 from or_pr_review.errors import ActionError, DivergedRangeError, SchemaError
 from or_pr_review.github_ops import GitHub
 from or_pr_review.loop import (
-    MAX_UNCOMPACTED_HISTORY_BYTES,
     MAX_REBASE_CONTEXT_BYTES,
+    MAX_UNCOMPACTED_HISTORY_BYTES,
     Ledger,
     LedgerFinding,
     apply_round,

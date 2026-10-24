@@ -268,7 +268,8 @@ def _validate_execution(context: ReviewContext) -> None:
         replies_bytes = len(execution.agent_replies.encode("utf-8", "strict"))
     except UnicodeEncodeError as exc:
         raise SchemaError("prepared execution replies are not valid UTF-8") from exc
-    reply_limit = MAX_UNCOMPACTED_HISTORY_BYTES  # compaction: none; the producer enforces tighter budgets
+    # compaction: none; the producer enforces tighter budgets
+    reply_limit = MAX_UNCOMPACTED_HISTORY_BYTES
     if replies_bytes > reply_limit:
         raise SchemaError(f"prepared execution replies exceed {reply_limit:,} UTF-8 bytes")
     try:
