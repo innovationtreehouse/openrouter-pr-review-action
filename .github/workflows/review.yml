@@ -1,0 +1,185 @@
+name: AI PR review (routed)
+
+# Reusable: route -> review -> judge -> optional rerun -> recommend -> scrub -> answer.
+# The router and this action come from the pinned commit of this repository; routing config
+# comes from the consumer's trusted branch, never from the PR head. See docs/router.md.
+on:
+  workflow_call:
+    inputs:
+      config_ref:
+        description: Trusted branch holding the config. Empty means the default branch.
+        type: string
+        default: ""
+      config_dir:
+        description: Config directory on config_ref (profiles.json, instructions.md, router.json).
+        type: string
+        default: .github/ai-review
+      missing_config:
+        description: warn (skip the review, job passes) or error (fail) when config_dir is absent.
+        type: string
+        default: warn
+    secrets:
+      OPENROUTER_API_KEY:
+        required: true
+
+jobs:
+  review:
+    # Spends the OpenRouter key, so a maintainer must opt the PR in with the ai-review
+    # label (applying labels needs triage access). Fork PRs get no secrets anyway.
+    if: >-
+      contains(github.event.pull_request.labels.*.name, 'ai-review') &&
+      (github.event.action != 'labeled' || github.event.label.name == 'ai-review') &&
+      github.event.pull_request.draft == false &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.user.login != 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    # The caller must grant at least these.
+    permissions:
+      contents: read
+      pull-requests: write
+    # Unrelated label events get their own group so they cannot cancel a running review.
+    concurrency:
+      group: openrouter-review-${{ github.event.pull_request.number }}-${{ (github.event.action == 'labeled' && github.event.label.name != 'ai-review') && github.run_id || 'review' }}
+      cancel-in-progress: true
+    # One review plus at most one rerun, each under the action's 22-minute budget.
+    timeout-minutes: 50
+    env:
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+      HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      GH_TOKEN: ${{ github.token }}
+      PYTHONPATH: .or-pr-review-action/src
+      AI_REVIEW_CFG: .ai-review-base/${{ inputs.config_dir }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      # The router and action run from this workflow's own commit (the caller's pin).
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha || 'job.workflow_sha-unavailable' }}
+          path: .or-pr-review-action
+          persist-credentials: false
+      # Prompt, checklists and router.json come from the trusted branch, so neither the PR nor
+      # a stacked parent branch can edit the reviewer.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.config_ref || github.event.repository.default_branch }}
+          path: .ai-review-base
+          sparse-checkout: ${{ inputs.config_dir }}
+          persist-credentials: false
+      - id: cfg
+        env:
+          CONFIG_REF: ${{ inputs.config_ref || github.event.repository.default_branch }}
+          MISSING: ${{ inputs.missing_config }}
+        run: |
+          if [ -f "$AI_REVIEW_CFG/profiles.json" ] && [ -f "$AI_REVIEW_CFG/instructions.md" ]; then
+            echo "AI review config from $CONFIG_REF at $(git -C .ai-review-base rev-parse --short HEAD)"
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          elif [ "$MISSING" = error ]; then
+            echo "::error::No AI review config on $CONFIG_REF; nothing was reviewed."
+            exit 1
+          else
+            echo "::warning::No AI review config on $CONFIG_REF yet; no review ran."
+          fi
+      # The decision model picks the review profiles and the rung; routing and judging never fail
+      # the check, a failure skips or ends the review instead.
+      - id: route
+        if: steps.cfg.outputs.ok == 'true'
+        continue-on-error: true
+        run: python3 -P -m or_pr_review.router route
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+      - id: review
+        if: steps.route.outputs.model != ''
+        continue-on-error: true
+        uses: ./.or-pr-review-action
+        with:
+          approve: ${{ steps.route.outputs.approve }}
+          pr_number: ${{ github.event.pull_request.number }}
+          models: ${{ steps.route.outputs.model }}
+          max_tool_turns: ${{ steps.route.outputs.max_tool_turns }}
+          max_diff_kb: ${{ steps.route.outputs.max_diff_kb }}
+          effort: ${{ steps.route.outputs.effort }}
+          custom_instructions: ${{ steps.route.outputs.instructions }}
+          path_profiles: ${{ steps.route.outputs.path_profiles }}
+          fail_on: never
+          judge_mode: ${{ steps.route.outputs.judge_mode }}
+          decision_model: ${{ steps.route.outputs.decision_model }}
+          decision_state_max: ${{ steps.route.outputs.decision_state_max }}
+          compaction_model: ${{ steps.route.outputs.compaction_model }}
+          # Continue the review loop only on new commits; label and reopen start fresh.
+          review_mode: ${{ github.event.action == 'synchronize' && 'auto' || 'initial' }}
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+      # The decision model judges whether the review is complete; if not, it picks a higher rung.
+      - id: judge
+        if: always() && steps.route.outputs.model != ''
+        continue-on-error: true
+        run: python3 -P -m or_pr_review.router adjudicate
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          TIER: ${{ steps.route.outputs.tier }}
+          PROFILES: ${{ steps.route.outputs.profiles }}
+          VERDICT: ${{ steps.review.outputs.verdict }}
+          REVIEW_URL: ${{ steps.review.outputs.review_url }}
+      - id: rerun
+        if: always() && steps.judge.outputs.rerun_tier != '' && steps.judge.outputs.rerun_tier != 'none'
+        continue-on-error: true
+        uses: ./.or-pr-review-action
+        with:
+          approve: ${{ steps.route.outputs.approve }}
+          pr_number: ${{ github.event.pull_request.number }}
+          models: ${{ steps.judge.outputs.model }}
+          max_tool_turns: ${{ steps.judge.outputs.max_tool_turns }}
+          max_diff_kb: ${{ steps.judge.outputs.max_diff_kb }}
+          effort: ${{ steps.judge.outputs.effort }}
+          custom_instructions: ${{ steps.route.outputs.rerun_instructions }}
+          path_profiles: ${{ steps.route.outputs.path_profiles }}
+          fail_on: never
+          judge_mode: ${{ steps.route.outputs.judge_mode }}
+          decision_model: ${{ steps.route.outputs.decision_model }}
+          decision_state_max: ${{ steps.route.outputs.decision_state_max }}
+          # The escalated rerun is a fresh review, not a verify round of the one the judge rejected.
+          review_mode: initial
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+      # Advisory only: a recommendation line on the final review plus the ai-recommends-approve label.
+      - if: always() && steps.route.outputs.model != ''
+        continue-on-error: true
+        run: python3 -P -m or_pr_review.router recommend
+        env:
+          RERUN_TIER: ${{ steps.judge.outputs.rerun_tier }}
+          REVIEW_VERDICT: ${{ steps.review.outputs.verdict }}
+          REVIEW_ISSUES: ${{ steps.review.outputs.issue_count }}
+          REVIEW_BUGS: ${{ steps.review.outputs.bug_count }}
+          REVIEW_URL: ${{ steps.review.outputs.review_url }}
+          RERUN_VERDICT: ${{ steps.rerun.outputs.verdict }}
+          RERUN_ISSUES: ${{ steps.rerun.outputs.issue_count }}
+          RERUN_BUGS: ${{ steps.rerun.outputs.bug_count }}
+          RERUN_URL: ${{ steps.rerun.outputs.review_url }}
+      # Posted reviews show a cost word instead of the dollar amount; exact figures stay in this log.
+      - if: always() && steps.route.outputs.model != ''
+        continue-on-error: true
+        run: python3 -P -m or_pr_review.router scrub
+      # Answers human questions left for the reviewer, in their thread. Not triggered by comments, so
+      # bot replies cannot loop; questions asked after a review are answered on the next push or label.
+      - if: always() && steps.route.outputs.model != ''
+        continue-on-error: true
+        timeout-minutes: 8
+        run: python3 -P -m or_pr_review.router answer
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          ANSWER_MODEL: ${{ steps.route.outputs.model }}
+      # The steps above never fail the check, so a review that posted nothing would show green.
+      # Route failure counts; when the judge orders a rerun, only the rerun's verdict counts.
+      - if: >-
+          !cancelled() && (steps.route.outcome == 'failure' ||
+          (steps.route.outputs.model != '' && steps.rerun.outputs.verdict == '' &&
+          (steps.review.outputs.verdict == '' ||
+          (steps.judge.outputs.rerun_tier != '' && steps.judge.outputs.rerun_tier != 'none'))))
+        run: |
+          echo "::error::AI review produced no usable verdict; re-run this job."
+          exit 1

@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Reusable routed review: `.github/workflows/review.yml` plus
+  `python -m or_pr_review.router` (route, adjudicate, recommend, scrub,
+  answer) replace each consumer's copy of `ai-review-route.py`. Per-repo
+  settings come from `.github/ai-review/router.json` (docs/router.md). The
+  decision state is fitted with pick mode's compactor instead of being cut.
+  No existing action input changes.
+
 - `judge_mode: pick` lets a systemone decision model (`decision_model`,
   default `baseten/mammoth-1:free`) choose which lane review to post, in place
   of the chat-model union merge. The chosen lane posts as a single lane would.

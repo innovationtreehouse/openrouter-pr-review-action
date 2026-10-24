@@ -4,7 +4,7 @@ An MIT-licensed GitHub Action that reviews pull requests using one or more model
 
 Author: **Nathan (FlyOverCoderKY) / RetireGolden, LLC**.
 
-**Start here:** [Setup](#setup) · [Choose models](#choosing-models) · [Repository guidance](#repository-review-guidance) · [Trusted profiles](docs/review-profiles.md) · [Copy-paste workflow](#copy-paste-one-lane-grok-via-openrouter) · [Agentic loops and merge gates](#agentic-loops-and-merge-gates) · [Troubleshooting](#troubleshooting) · [Inputs](#inputs)
+**Start here:** [Setup](#setup) · [Routed review](#copy-paste-routed-review-decision-model-tiers-judge-rerun) · [Choose models](#choosing-models) · [Repository guidance](#repository-review-guidance) · [Trusted profiles](docs/review-profiles.md) · [Copy-paste workflow](#copy-paste-one-lane-grok-via-openrouter) · [Agentic loops and merge gates](#agentic-loops-and-merge-gates) · [Troubleshooting](#troubleshooting) · [Inputs](#inputs)
 
 ## Setup
 
@@ -416,6 +416,30 @@ reusable workflow does). It declares the job's intended target; it is not a live
 head lookup. If the final live-head lookup fails, publication is partial with no
 new ledger. A missing or invalid context fails the job and posts a best-effort
 incomplete status instead of reconstructing review state.
+
+## Copy-paste: routed review (decision-model tiers, judge, rerun)
+
+`review.yml` picks the reviewer per PR from a cost ladder, judges the posted review, reruns it once on a stronger rung when it is incomplete, and adds an advisory approve recommendation. Routing config lives on a trusted branch of the consumer; see [docs/router.md](docs/router.md) for `router.json`, the trust model and the decision-state compaction. Add the `ai-review` label to a PR to review it.
+
+```yaml
+name: openrouter pr review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, labeled]
+
+jobs:
+  review:
+    uses: innovationtreehouse/openrouter-pr-review-action/.github/workflows/review.yml@<full-commit-sha>
+    permissions:
+      contents: read
+      pull-requests: write
+    # with:
+    #   config_ref: development    # trusted branch with .github/ai-review (default: default branch)
+    #   missing_config: error      # fail instead of skipping when the config is absent
+    secrets:
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+```
 
 ## Recommended caller concurrency
 
