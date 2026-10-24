@@ -93,9 +93,13 @@ class State:
     """Ordered state items with per-item sizes; never serialized whole to measure."""
 
     def __init__(
-        self, items: list[Item], cap: int, cap_tokens: int = DEFAULT_STATE_MAX_TOKENS
+        self,
+        items: list[Item],
+        cap: int,
+        cap_tokens: int = DEFAULT_STATE_MAX_TOKENS,
+        note: str = UNTRUSTED_NOTE,
     ) -> None:
-        self.items, self.cap, self.cap_tokens = items, cap, cap_tokens
+        self.items, self.cap, self.cap_tokens, self.note = items, cap, cap_tokens, note
         for item in items:
             item.measure()
         self.steps: dict[tuple[str, str], list[int]] = {}
@@ -129,7 +133,7 @@ class State:
         ]
         # The caps stand in for the after-sizes: same digit counts whenever the state fits.
         return {
-            "untrusted": UNTRUSTED_NOTE,
+            "untrusted": self.note,
             "cap_bytes": self.cap,
             "cap_estimated_tokens": self.cap_tokens,
             "applied": applied,
