@@ -7,7 +7,7 @@
     "X-title": "OpenRouter PR Review Action"
   },
   "body": {
-    "model": "baseten/mammoth-1:free",
+    "model": "baseten/mammoth-1",
     "state": {"lanes": {"lane_1": {"model": "x/a"}}, "pr": {"title": "Fix 漢字"}},
     "questions": {
       "better_lane": {

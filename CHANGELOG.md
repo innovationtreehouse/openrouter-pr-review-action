@@ -3,7 +3,7 @@
 ## Unreleased
 
 - `judge_mode: pick` lets a systemone decision model (`decision_model`,
-  default `baseten/mammoth-1:free`) choose which lane review to post, in place
+  default `baseten/mammoth-1`) choose which lane review to post, in place
   of the chat-model union merge. The chosen lane posts as a single lane would.
   Over `decision_state_max` the decision state is compacted step by step, and
   any failure posts the labeled deterministic union. `merge` stays the default.
