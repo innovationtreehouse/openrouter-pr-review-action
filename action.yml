@@ -57,7 +57,7 @@ inputs:
   decision_model:
     description: "Pick mode only: the Jev-protocol decision model slug."
     required: false
-    default: "baseten/mammoth-1:free"
+    default: "baseten/mammoth-1"
   decision_endpoint:
     description: "Pick mode only: the OpenRouter API path the decision model answers on."
     required: false

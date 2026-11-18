@@ -27,7 +27,7 @@ from or_pr_review.publish import decide_verdict
 from or_pr_review.schema import LaneResult
 from or_pr_review.triage import split_diff
 
-DEFAULT_DECISION_MODEL = "baseten/mammoth-1:free"
+DEFAULT_DECISION_MODEL = "baseten/mammoth-1"
 DEFAULT_DECISION_ENDPOINT = "systemone"
 # Mammoth's context is 16,384 tokens (apps.checkin#2415). 12,000 estimated state tokens leave
 # ~4,000 for the questions and the endpoint's prompt; the byte cap is an upper bound.

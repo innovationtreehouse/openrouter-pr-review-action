@@ -293,7 +293,7 @@ def test_decision_failure_falls_back_to_the_labeled_union(monkeypatch):
     monkeypatch.setattr(pick, "ask", boom)
     outcome = resolve(monkeypatch, ENV)
     assert outcome.picked is None
-    assert outcome.note.startswith("`baseten/mammoth-1:free` (pick decision fallback")
+    assert outcome.note.startswith("`baseten/mammoth-1` (pick decision fallback")
     assert len(outcome.issues) == 3  # the union: both lanes' code findings
 
 
@@ -326,7 +326,7 @@ def test_pick_mode_posts_the_chosen_lane_verbatim(monkeypatch, tmp_path):
     assert cli._finish(env, lanes, collected(diff=diff), LoopState("initial", 1)) == 0
     body, comments = github.posted[0]
     assert "**Verdict:** `issues`" in body  # lane_2's checkout diagnostic is not posted
-    assert "**Judge:** Picked by `baseten/mammoth-1:free` from 2 lanes: " in body
+    assert "**Judge:** Picked by `baseten/mammoth-1` from 2 lanes: " in body
     assert "`synthetic/reviewer-a` (lane_1; p=0.80; safe-to-post lane_1=0.90" in body
     for finding in lanes[0].findings:
         assert finding.title in body and finding.body in body
@@ -481,7 +481,7 @@ def test_real_request_builder_matches_the_recorded_shape(monkeypatch):
     lanes = [lane("x/a", []), lane("x/b", [])]
     state = {"lanes": {"lane_1": {"model": "x/a"}}, "pr": {"title": "Fix 漢字"}}
     response = pick.ask(
-        model="baseten/mammoth-1:free",
+        model="baseten/mammoth-1",
         endpoint="systemone",
         api_key="sk-secret",
         state=state,
